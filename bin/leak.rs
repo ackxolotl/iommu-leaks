@@ -18,34 +18,15 @@ const NUM_PACKETS: usize = 2048;
 // size of our packets
 const PACKET_SIZE: usize = 60;
 
-#[repr(C)]
-#[derive(Copy, Clone)]
-struct tsc_inner {
-    pub lo_32: u32,
-    pub hi_32: u32,
-}
-
-#[repr(C)]
-#[derive(Copy, Clone)]
-union tsc {
-    pub tsc_64: u64,
-    pub inner: tsc_inner,
-}
-
+#[cfg(all(any(target_arch = "x86", target_arch = "x86_64")))]
+#[inline(always)]
 pub fn rdtsc() -> u64 {
-    let mut tmp: tsc = tsc { tsc_64: 0 };
+    #[cfg(target_arch = "x86")]
+    use core::arch::x86;
+    #[cfg(target_arch = "x86_64")]
+    use core::arch::x86_64 as x86;
 
-    unsafe {
-        llvm_asm!("rdtsc"
-        : "={eax}" (tmp.inner.lo_32),
-          "={edx}" (tmp.inner.hi_32)
-        :
-        :
-        : "volatile"
-        );
-    }
-
-    return unsafe { tmp.tsc_64 };
+    return unsafe { x86::_rdtsc() };
 }
 
 pub fn main() {
