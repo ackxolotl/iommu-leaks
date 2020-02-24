@@ -1,15 +1,11 @@
-#![feature(llvm_asm)]
-
 use std::collections::VecDeque;
 use std::env;
 use std::process;
-use std::time::{Duration, Instant};
 
 use byteorder::{ByteOrder, LittleEndian};
 use ixy::memory::{alloc_pkt_batch, Mempool, Packet};
 use ixy::*;
 use simple_logger::SimpleLogger;
-use std::thread::sleep;
 
 // number of packets sent simultaneously by our driver
 const BATCH_SIZE: usize = 1;
@@ -35,6 +31,10 @@ pub fn main() {
     let mut args = env::args();
     args.next();
 
+    println!("Cycles: {}", rdtsc());
+    //sleep(Duration::new(0, 0));
+    println!("Cycles: {}", rdtsc());
+
     let pci_addr = match args.next() {
         Some(arg) => arg,
         None => {
@@ -43,7 +43,9 @@ pub fn main() {
         }
     };
 
-    let mut dev = ixy_init(&pci_addr, 1, 1, 0).unwrap();
+    let mut dev = ixgbe_init(&pci_addr, 1, 1, 0).unwrap();
+
+    dev.enable_loopback();
 
     #[rustfmt::skip]
     let mut pkt_data = [
@@ -96,41 +98,36 @@ pub fn main() {
     dev.read_stats(&mut dev_stats_old);
 
     let mut buffer: VecDeque<Packet> = VecDeque::with_capacity(BATCH_SIZE);
-    let mut time = Instant::now();
-    let mut seq_num = 0;
-    let mut counter = 0;
-
-    println!("Cycles: {}", rdtsc());
-    sleep(Duration::new(1, 0));
-    println!("Cycles: {}", rdtsc());
 
     loop {
         // re-fill our packet queue with new packets to send out
         alloc_pkt_batch(&pool, &mut buffer, BATCH_SIZE, PACKET_SIZE);
 
-        // update sequence number of all packets (and checksum if necessary)
+        // set packet content to rdtsc
         for p in buffer.iter_mut() {
-            LittleEndian::write_u32(&mut p[(PACKET_SIZE - 4)..], seq_num);
-            seq_num = seq_num.wrapping_add(1);
+            LittleEndian::write_u64(&mut p[(PACKET_SIZE - 8)..], rdtsc());
         }
 
         dev.tx_batch_busy_wait(0, &mut buffer);
 
         // don't poll the time unnecessarily
-        if counter & 0xfff == 0 {
-            let elapsed = time.elapsed();
-            let nanos = elapsed.as_secs() * 1_000_000_000 + u64::from(elapsed.subsec_nanos());
-            // every second
-            if nanos > 1_000_000_000 {
-                dev.read_stats(&mut dev_stats);
-                dev_stats.print_stats_diff(&*dev, &dev_stats_old, nanos);
-                dev_stats_old = dev_stats;
+        loop {
+            let num_rx = dev.rx_batch(0, &mut buffer, BATCH_SIZE);
 
-                time = Instant::now();
+            if num_rx > 0 {
+                // compare timestamps
+                for p in buffer.iter_mut() {
+                    let rcvd = rdtsc();
+                    let sent = LittleEndian::read_u64(&mut p[(PACKET_SIZE - 8)..]);
+                    println!("Difference: {}", rcvd - sent);
+                }
+
+                // drop packets if they haven't been sent out
+                buffer.drain(..);
+
+                break;
             }
         }
-
-        counter += 1;
     }
 }
 

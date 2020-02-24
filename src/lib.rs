@@ -240,6 +240,35 @@ pub fn ixy_init(
     }
 }
 
+/// Initializes the network card at `pci_addr`.
+///
+/// `rx_queues` and `tx_queues` specify the number of queues that will be initialized and used
+/// while `interrupt_timeout` enables interrupts if greater or less than zero.
+pub fn ixgbe_init(
+    pci_addr: &str,
+    rx_queues: u16,
+    tx_queues: u16,
+    interrupt_timeout: i16,
+) -> Result<Box<IxgbeDevice>, Box<dyn Error>> {
+    let mut config_file = pci_open_resource(pci_addr, "config").expect("wrong pci address");
+
+    let vendor_id = read_io16(&mut config_file, 0)?;
+    let device_id = read_io16(&mut config_file, 2)?;
+    let class_id = read_io32(&mut config_file, 8)? >> 24;
+
+    if class_id != 2 {
+        return Err(format!("device {} is not a network card", pci_addr).into());
+    }
+
+    if vendor_id == 0x1af4 && device_id == 0x1000 {
+        return Err(format!("device {} is a virtio device", pci_addr).into());
+    } else {
+        // let's give it a try with ixgbe
+        let device = IxgbeDevice::init(pci_addr, rx_queues, tx_queues, interrupt_timeout)?;
+        Ok(Box::new(device))
+    }
+}
+
 impl IxyDevice for Box<dyn IxyDevice> {
     fn get_driver_name(&self) -> &str {
         (**self).get_driver_name()
