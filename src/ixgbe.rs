@@ -344,6 +344,12 @@ impl IxyDevice for IxgbeDevice {
             _ => 0,
         }
     }
+
+    /// Enables loopback mode for this device.
+    fn enable_loopback(&self) {
+        // section 14.1
+        self.set_reg32(IXGBE_HLREG0, self.get_reg32(IXGBE_HLREG0) | (1 << 15));
+    }
 }
 
 impl IxgbeDevice {
@@ -1009,13 +1015,6 @@ impl IxgbeDevice {
             }
         }
         Ok(())
-    }
-
-    // sections 14.1
-    /// Enables loopback mode for this device.
-    pub fn enable_loopback(&mut self) {
-        self.set_reg32(IXGBE_HLREG0, self.get_reg32(IXGBE_HLREG0) | (1 << 15));
-        // warn!("%x", self.get_reg32(IXGBE_AUTOC));
     }
 }
 

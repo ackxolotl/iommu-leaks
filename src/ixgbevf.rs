@@ -33,7 +33,7 @@ fn wrap_ring(index: usize, ring_size: usize) -> usize {
     (index + 1) & (ring_size - 1)
 }
 
-pub struct Mailbox {
+struct Mailbox {
     api_version: ixgbe_pfvf_api_rev,
 
     timeout: u32,
@@ -347,6 +347,12 @@ impl IxyDevice for IxgbeVFDevice {
             IXGBE_LINKS_SPEED_10G_82599 => 10000,
             _ => 0,
         }
+    }
+
+    /// Enables loopback mode for this device.
+    fn enable_loopback(&self) {
+        // section 14.1
+        self.set_reg32(IXGBE_HLREG0, self.get_reg32(IXGBE_HLREG0) | (1 << 15));
     }
 }
 

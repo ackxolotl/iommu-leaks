@@ -244,6 +244,11 @@ impl IxyDevice for VirtioDevice {
         // Virtio doesn't have a "link speed" per se so we just return something reasonable
         1000
     }
+
+    /// Enables loopback mode for this device.
+    fn enable_loopback(&self) {
+        unimplemented!();
+    }
 }
 
 impl VirtioDevice {
@@ -520,7 +525,7 @@ impl VirtqueueType {
     }
 }
 
-pub struct Virtqueue {
+struct Virtqueue {
     size: u16,
     desc: *mut VirtqDesc,
     available: RingWrapper<VirtqAvail>,

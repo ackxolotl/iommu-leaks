@@ -22,7 +22,7 @@ pub fn rdtsc() -> u64 {
     #[cfg(target_arch = "x86_64")]
     use core::arch::x86_64 as x86;
 
-    return unsafe { x86::_rdtsc() };
+    unsafe { x86::_rdtsc() }
 }
 
 pub fn main() {
@@ -43,7 +43,7 @@ pub fn main() {
         }
     };
 
-    let mut dev = ixgbe_init(&pci_addr, 1, 1, 0).unwrap();
+    let mut dev = ixy_init(&pci_addr, 1, 1, 0).unwrap();
 
     dev.enable_loopback();
 
@@ -118,7 +118,7 @@ pub fn main() {
                 // compare timestamps
                 for p in buffer.iter_mut() {
                     let rcvd = rdtsc();
-                    let sent = LittleEndian::read_u64(&mut p[(PACKET_SIZE - 8)..]);
+                    let sent = LittleEndian::read_u64(&p[(PACKET_SIZE - 8)..]);
                     println!("Difference: {}", rcvd - sent);
                 }
 
