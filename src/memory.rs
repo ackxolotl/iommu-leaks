@@ -4,11 +4,10 @@ use std::error::Error;
 use std::fmt::{self, Debug};
 use std::io::{self, Read, Seek};
 use std::ops::{Deref, DerefMut};
-use std::os::unix::io::{AsRawFd, RawFd};
+use std::os::unix::io::RawFd;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
-use std::{fs, mem, process, ptr, slice};
+use std::{fs, mem, ptr, slice};
 
 use crate::vfio::vfio_map_dma;
 
@@ -26,8 +25,6 @@ pub const IOVA_WIDTH: u8 = X86_VA_WIDTH;
 // which results in a different alignment requirement
 pub const PACKET_HEADROOM: usize = 32;
 
-static HUGEPAGE_ID: AtomicUsize = AtomicUsize::new(0);
-
 // we want one VFIO Container for all NICs, so every NIC can read from every
 // other NICs memory, especially the mempool. When not using the IOMMU / VFIO,
 // this variable is unused.
@@ -43,8 +40,6 @@ pub struct Dma<T> {
     pub phys: usize,
 }
 
-const MAP_HUGE_2MB: i32 = 0x5400_0000; // 21 << 26
-
 impl<T> Dma<T> {
     /// Allocates dma memory on a huge page.
     pub fn allocate(size: usize, require_contigous: bool) -> Result<Dma<T>, Box<dyn Error>> {
@@ -57,83 +52,22 @@ impl<T> Dma<T> {
         if get_vfio_container() != -1 {
             debug!("allocating dma memory via VFIO");
 
-            let ptr = if IOVA_WIDTH < X86_VA_WIDTH {
-                // To support IOMMUs capable of 39 bit wide IOVAs only, we use
-                // 32 bit addresses. Since mmap() ignores libc::MAP_32BIT when
-                // using libc::MAP_HUGETLB, we create a 32 bit address with the
-                // right alignment (huge page size, e.g. 2 MB) on our own.
+            let page_size = unsafe { libc::sysconf(libc::_SC_PAGE_SIZE) } as usize;
 
-                // first allocate memory of size (needed size + 1 huge page) to
-                // get a mapping containing the huge page size aligned address
-                let addr = unsafe {
-                    libc::mmap(
-                        ptr::null_mut(),
-                        size + HUGE_PAGE_SIZE,
-                        libc::PROT_READ | libc::PROT_WRITE,
-                        libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_32BIT,
-                        -1,
-                        0,
-                    )
-                };
+            // round up multiple of page size
+            let size = ((size + page_size - 1) as isize & -(page_size as isize)) as usize;
 
-                // calculate the huge page size aligned address by rounding up
-                let aligned_addr = ((addr as isize + HUGE_PAGE_SIZE as isize - 1)
-                    & -(HUGE_PAGE_SIZE as isize))
-                    as *mut libc::c_void;
-
-                let free_chunk_size = aligned_addr as usize - addr as usize;
-
-                // free unneeded pages (i.e. all chunks of the additionally mapped huge page)
-                unsafe {
-                    libc::munmap(addr, free_chunk_size);
-                    libc::munmap(aligned_addr.add(size), HUGE_PAGE_SIZE - free_chunk_size);
-                }
-
-                // finally map huge pages at the huge page size aligned 32 bit address
-                unsafe {
-                    libc::mmap(
-                        aligned_addr as *mut libc::c_void,
-                        size,
-                        libc::PROT_READ | libc::PROT_WRITE,
-                        libc::MAP_SHARED
-                            | libc::MAP_ANONYMOUS
-                            | libc::MAP_HUGETLB
-                            | MAP_HUGE_2MB
-                            | libc::MAP_FIXED,
-                        -1,
-                        0,
-                    )
-                }
-            } else {
-                unsafe {
-                    libc::mmap(
-                        ptr::null_mut(),
-                        size,
-                        libc::PROT_READ | libc::PROT_WRITE,
-                        libc::MAP_SHARED | libc::MAP_ANONYMOUS | libc::MAP_HUGETLB | MAP_HUGE_2MB,
-                        -1,
-                        0,
-                    )
-                }
-            };
+            let dma = Dma::allocate_bruteforce(size)?;
 
             // This is the main IOMMU work: IOMMU DMA MAP the memory...
-            if ptr == libc::MAP_FAILED {
-                Err(format!(
-                    "failed to memory map DMA-memory. Errno: {}",
-                    std::io::Error::last_os_error()
-                )
-                .into())
-            } else {
-                let iova = vfio_map_dma(ptr as usize, size)?;
+            let iova = vfio_map_dma(dma.virt as *mut u8 as usize, size)?;
 
-                let memory = Dma {
-                    virt: ptr as *mut T,
-                    phys: iova,
-                };
+            let memory = Dma {
+                virt: dma.virt as *mut T,
+                phys: iova,
+            };
 
-                Ok(memory)
-            }
+            Ok(memory)
         } else {
             debug!("allocating dma memory via huge page");
 
@@ -141,49 +75,101 @@ impl<T> Dma<T> {
                 return Err("failed to map physically contiguous memory".into());
             }
 
-            let id = HUGEPAGE_ID.fetch_add(1, Ordering::SeqCst);
-            let path = format!("/mnt/huge/ixy-{}-{}", process::id(), id);
+            Ok(Dma::allocate_bruteforce(size)?)
+        }
+    }
 
-            match fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .open(path.clone())
-            {
-                Ok(f) => {
-                    let ptr = unsafe {
-                        libc::mmap(
-                            ptr::null_mut(),
-                            size,
-                            libc::PROT_READ | libc::PROT_WRITE,
-                            libc::MAP_SHARED | libc::MAP_HUGETLB,
-                            f.as_raw_fd(),
-                            0,
-                        )
+    /// Allocates contiguous memory using ordinary pages.
+    fn allocate_bruteforce(size: usize) -> Result<Dma<T>, Box<dyn Error>> {
+        let page_size = unsafe { libc::sysconf(libc::_SC_PAGE_SIZE) } as usize;
+
+        let num_pages = 1024;
+        let pool_size = num_pages * page_size;
+
+        // round up multiple of page size
+        let size = ((size + page_size - 1) as isize & -(page_size as isize)) as usize;
+
+        debug!("Requested {} pages", size / page_size);
+
+        // Allocate target area to map our pages into. This is to prevent collisions in the virtual address space during remapping
+        // Use libc::MAP_32BIT for compatibility with IOMMUs suporting only short IOVAs (i.e. <47 bit)
+        let target = unsafe {
+            libc::mmap(
+                ptr::null_mut(),
+                pool_size,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_32BIT,
+                -1,
+                0,
+            )
+        };
+
+        if target == libc::MAP_FAILED {
+            return Err("failed to memory map".into());
+        }
+
+        let pool = unsafe {
+            libc::mmap(
+                ptr::null_mut(),
+                pool_size,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE,
+                -1,
+                0,
+            )
+        };
+
+        if pool == libc::MAP_FAILED {
+            Err("failed to memory map".into())
+        } else if unsafe { libc::mlock(pool as *mut libc::c_void, pool_size) } == 0 {
+            let mut pages: Vec<(usize, usize)> = Vec::new();
+
+            for i in 0..num_pages {
+                let virt_addr = pool as usize + i * page_size;
+
+                unsafe {
+                    let tmp = ptr::read_volatile(virt_addr as *mut u8);
+                    ptr::write_volatile(virt_addr as *mut u8, tmp);
+                }
+
+                pages.push((virt_addr, virt_to_phys(virt_addr)?));
+            }
+
+            pages.sort_by_key(|k| k.1);
+
+            for (i, p) in pages.iter_mut().enumerate() {
+                p.0 = unsafe {
+                    libc::mremap(
+                        p.0 as *mut libc::c_void,
+                        page_size,
+                        page_size,
+                        libc::MREMAP_MAYMOVE | libc::MREMAP_FIXED,
+                        target as usize + i * page_size,
+                    )
+                } as usize;
+                p.1 = virt_to_phys(p.0)?;
+            }
+
+            let mut first_page = 0;
+
+            for i in 0..(num_pages - 1) {
+                if i - first_page >= size / page_size - 1 {
+                    let memory = Dma {
+                        virt: pages[first_page].0 as *mut T,
+                        phys: virt_to_phys(pages[first_page].0 as usize)?,
                     };
 
-                    if ptr == libc::MAP_FAILED {
-                        Err("failed to memory map huge page - huge pages enabled and free?".into())
-                    } else if unsafe { libc::mlock(ptr as *mut libc::c_void, size) } == 0 {
-                        let memory = Dma {
-                            virt: ptr as *mut T,
-                            phys: virt_to_phys(ptr as usize)?,
-                        };
-
-                        Ok(memory)
-                    } else {
-                        Err("failed to memory lock huge page".into())
-                    }
+                    return Ok(memory);
                 }
-                Err(ref e) if e.kind() == io::ErrorKind::NotFound => Err(Box::new(io::Error::new(
-                    io::ErrorKind::NotFound,
-                    format!(
-                        "huge page {} could not be created - huge pages enabled?",
-                        path
-                    ),
-                ))),
-                Err(e) => Err(Box::new(e)),
+
+                if pages[i + 1].1 - pages[i].1 != page_size {
+                    first_page = i + 1;
+                }
             }
+
+            Err("could not find contiguous memory".into())
+        } else {
+            Err("failed to memory lock huge page".into())
         }
     }
 }
