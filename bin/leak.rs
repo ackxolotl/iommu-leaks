@@ -10,7 +10,7 @@ use simple_logger::SimpleLogger;
 // number of packets sent simultaneously by our driver
 const BATCH_SIZE: usize = 1;
 // number of packets in our mempool
-const NUM_PACKETS: usize = 2048;
+const NUM_PACKETS: usize = 1024;
 // size of our packets
 const PACKET_SIZE: usize = 60;
 

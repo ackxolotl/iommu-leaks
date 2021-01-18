@@ -24,7 +24,7 @@ const DRIVER_NAME: &str = "ixy-ixgbe";
 const MAX_QUEUES: u16 = 64;
 
 const PKT_BUF_ENTRY_SIZE: usize = 2048;
-const MIN_MEMPOOL_SIZE: usize = 4096;
+const MIN_MEMPOOL_SIZE: usize = 1024;
 
 const NUM_RX_QUEUE_ENTRIES: usize = 512;
 const NUM_TX_QUEUE_ENTRIES: usize = 512;
