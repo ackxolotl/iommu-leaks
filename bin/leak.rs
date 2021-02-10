@@ -2,38 +2,24 @@ use std::collections::VecDeque;
 use std::env;
 use std::process;
 
-use byteorder::{ByteOrder, LittleEndian};
 use ixy::memory::{alloc_pkt_batch, Mempool, Packet};
 use ixy::*;
 use simple_logger::SimpleLogger;
 
 // number of packets sent simultaneously by our driver
-const BATCH_SIZE: usize = 1;
-// number of packets in our mempool
-const NUM_PACKETS: usize = 1024;
+const BATCH_SIZE: usize = 63;
 // size of our packets
 const PACKET_SIZE: usize = 60;
-
-#[cfg(all(any(target_arch = "x86", target_arch = "x86_64")))]
-#[inline(always)]
-pub fn rdtsc() -> u64 {
-    #[cfg(target_arch = "x86")]
-    use core::arch::x86;
-    #[cfg(target_arch = "x86_64")]
-    use core::arch::x86_64 as x86;
-
-    unsafe { x86::_rdtsc() }
-}
+// number of packets in our mempool
+const NUM_PACKETS: usize = 512;
+// size of our packet buffers in the mempool
+const BUFFER_SIZE: usize = 4096;
 
 pub fn main() {
     SimpleLogger::new().init().unwrap();
 
     let mut args = env::args();
     args.next();
-
-    println!("Cycles: {}", rdtsc());
-    //sleep(Duration::new(0, 0));
-    println!("Cycles: {}", rdtsc());
 
     let pci_addr = match args.next() {
         Some(arg) => arg,
@@ -45,6 +31,7 @@ pub fn main() {
 
     let mut dev = ixy_init(&pci_addr, 1, 1, 0).unwrap();
 
+    dev.disable_rx_queue(0);
     dev.enable_loopback();
 
     #[rustfmt::skip]
@@ -70,7 +57,7 @@ pub fn main() {
     // VFs: src MAC must be MAC of the device (spoof check of PF)
     pkt_data[6..12].clone_from_slice(&dev.get_mac_addr());
 
-    let pool = Mempool::allocate(NUM_PACKETS, 0).unwrap();
+    let pool = Mempool::allocate(NUM_PACKETS, BUFFER_SIZE).unwrap();
 
     // pre-fill all packet buffer in the pool with data and return them to the packet pool
     {
@@ -99,36 +86,55 @@ pub fn main() {
 
     let mut buffer: VecDeque<Packet> = VecDeque::with_capacity(BATCH_SIZE);
 
-    loop {
-        // re-fill our packet queue with new packets to send out
-        alloc_pkt_batch(&pool, &mut buffer, BATCH_SIZE, PACKET_SIZE);
+    // get a batch full of physical addresses to prepare tx descriptors
+    alloc_pkt_batch(&pool, &mut buffer, BATCH_SIZE, PACKET_SIZE);
 
-        // set packet content to rdtsc
-        for p in buffer.iter_mut() {
-            LittleEndian::write_u64(&mut p[(PACKET_SIZE - 8)..], rdtsc());
-        }
+    // prepare the whole queue with tx descriptors, i.e. 63 and a duplicate address
+    let mut buffer_addrs: Vec<usize> = buffer.iter().map(|p| p.get_phys_addr()).collect();
+    buffer_addrs.push(buffer.front().unwrap().get_phys_addr());
 
-        dev.tx_batch_busy_wait(0, &mut buffer);
+    dev.prepare_tx_desc(0, &buffer_addrs, PACKET_SIZE);
 
-        // don't poll the time unnecessarily
-        loop {
-            let num_rx = dev.rx_batch(0, &mut buffer, BATCH_SIZE);
+    let mut count = 0;
+    let mut mean = 0.0;
+    let mut squared_distance = 0.0;
 
-            if num_rx > 0 {
-                // compare timestamps
-                for p in buffer.iter_mut() {
-                    let rcvd = rdtsc();
-                    let sent = LittleEndian::read_u64(&p[(PACKET_SIZE - 8)..]);
-                    println!("Difference: {}", rcvd - sent);
-                }
+    for _ in 0..(1 << 22) {
+        let cpu_cycles = dev.tx_prepared_desc(0, BATCH_SIZE);
 
-                // drop packets if they haven't been sent out
-                buffer.drain(..);
-
-                break;
-            }
-        }
+        // fix when https://github.com/rust-lang/rust/issues/71126 has been stabilized
+        let (new_count, new_mean, new_squared_distance) =
+            wellford_update(count, mean, squared_distance, cpu_cycles);
+        count = new_count;
+        mean = new_mean;
+        squared_distance = new_squared_distance;
     }
+
+    let (mean, variance, sample_variance) = wellford_finalize(count, mean, squared_distance);
+
+    println!("Mean:            {:.5}", mean);
+    println!("Variance:        {:.5}", variance);
+    println!("Sample variance: {:.5}", sample_variance);
+}
+
+/// Compute variance and mean in a single pass - update accumulators
+#[inline(always)]
+fn wellford_update(count: u64, mean: f64, squared_distance: f64, value: u64) -> (u64, f64, f64) {
+    let count = count + 1;
+    let delta = value as f64 - mean;
+    let mean = mean + delta / count as f64;
+    let squared_distance = squared_distance + delta * (value as f64 - mean);
+
+    (count, mean, squared_distance)
+}
+
+/// Compute variance and mean in a single pass - calculate result
+fn wellford_finalize(count: u64, mean: f64, squared_distance: f64) -> (f64, f64, f64) {
+    (
+        mean,
+        squared_distance / count as f64,
+        squared_distance / (count - 1) as f64,
+    )
 }
 
 /// Calculates IPv4 header checksum

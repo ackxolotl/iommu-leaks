@@ -23,15 +23,32 @@ const DRIVER_NAME: &str = "ixy-ixgbe";
 
 const MAX_QUEUES: u16 = 64;
 
-const PKT_BUF_ENTRY_SIZE: usize = 2048;
-const MIN_MEMPOOL_SIZE: usize = 1024;
+const PKT_BUF_ENTRY_SIZE: usize = 1024;
+const MIN_MEMPOOL_SIZE: usize = 128;
 
-const NUM_RX_QUEUE_ENTRIES: usize = 512;
-const NUM_TX_QUEUE_ENTRIES: usize = 512;
-const TX_CLEAN_BATCH: usize = 32;
+const NUM_RX_QUEUE_ENTRIES: usize = 64;
+const NUM_TX_QUEUE_ENTRIES: usize = 64;
+const TX_CLEAN_BATCH: usize = 16;
 
 fn wrap_ring(index: usize, ring_size: usize) -> usize {
     (index + 1) & (ring_size - 1)
+}
+
+#[cfg(all(any(target_arch = "x86", target_arch = "x86_64")))]
+#[inline(always)]
+fn rdtsc() -> u64 {
+    #[cfg(target_arch = "x86")]
+    use core::arch::x86;
+    #[cfg(target_arch = "x86_64")]
+    use core::arch::x86_64 as x86;
+
+    unsafe {
+        x86::_mm_lfence();
+        let rdtsc = x86::_rdtsc();
+        x86::_mm_lfence();
+
+        rdtsc
+    }
 }
 
 pub struct IxgbeDevice {
@@ -350,6 +367,86 @@ impl IxyDevice for IxgbeDevice {
         // section 14.1
         self.set_reg32(IXGBE_HLREG0, self.get_reg32(IXGBE_HLREG0) | (1 << 15));
     }
+
+    fn disable_rx_queue(&mut self, queue_id: u32) {
+        self.clear_flags32(IXGBE_RXDCTL(queue_id), IXGBE_RXDCTL_ENABLE);
+    }
+
+    fn prepare_tx_desc(&mut self, queue_id: u32, buffer_addr: &[usize], packet_len: usize) {
+        let queue = self
+            .tx_queues
+            .get_mut(queue_id as usize)
+            .expect("invalid tx queue id");
+
+        let mut cur_index = queue.tx_index;
+
+        for addr in buffer_addr {
+            unsafe {
+                ptr::write_volatile(
+                    &mut (*queue.descriptors.add(cur_index)).read.buffer_addr as *mut u64,
+                    *addr as u64,
+                );
+                ptr::write_volatile(
+                    &mut (*queue.descriptors.add(cur_index)).read.cmd_type_len as *mut u32,
+                    IXGBE_ADVTXD_DCMD_EOP
+                        //| IXGBE_ADVTXD_DCMD_RS              /* do not write back descriptor */
+                        | IXGBE_ADVTXD_DCMD_IFCS
+                        | IXGBE_ADVTXD_DCMD_DEXT
+                        | IXGBE_ADVTXD_DTYP_DATA
+                        | packet_len as u32,
+                );
+                ptr::write_volatile(
+                    &mut (*queue.descriptors.add(cur_index)).read.olinfo_status as *mut u32,
+                    (packet_len as u32) << IXGBE_ADVTXD_PAYLEN_SHIFT,
+                );
+            }
+
+            cur_index = wrap_ring(cur_index, queue.num_descriptors);
+        }
+    }
+
+    fn tx_prepared_desc(&mut self, queue_id: u32, num_packets: usize) -> u64 {
+        let queue = self
+            .tx_queues
+            .get_mut(queue_id as usize)
+            .expect("invalid tx queue id");
+
+        let mut cur_index = queue.tx_index + num_packets - 1;
+
+        if cur_index >= queue.num_descriptors {
+            cur_index -= queue.num_descriptors;
+        }
+
+        let descriptor = unsafe { &mut (*queue.descriptors.add(cur_index)) };
+
+        let tx_index = wrap_ring(cur_index, queue.num_descriptors);
+
+        queue.tx_index = tx_index;
+        queue.clean_index = tx_index;
+
+        let cmd_type_len =
+            unsafe { ptr::read_volatile(descriptor.read.cmd_type_len as *const u32) };
+
+        let before = rdtsc();
+
+        unsafe {
+            ptr::write_volatile(
+                &mut descriptor.read.cmd_type_len as *mut u32,
+                cmd_type_len | IXGBE_ADVTXD_DCMD_RS,
+            )
+        };
+
+        self.set_reg32(IXGBE_TDT(queue_id), tx_index as u32);
+
+        loop {
+            let status = unsafe { ptr::read_volatile(&descriptor.wb.status as *const u32) };
+
+            if (status & IXGBE_ADVTXD_STAT_DD) != 0 {
+                let after = rdtsc();
+                return after - before;
+            }
+        }
+    }
 }
 
 impl IxgbeDevice {
@@ -625,7 +722,7 @@ impl IxgbeDevice {
             let mut txdctl = self.get_reg32(IXGBE_TXDCTL(u32::from(i)));
             // there are no defines for this in constants.rs for some reason
             // pthresh: 6:0, hthresh: 14:8, wthresh: 22:16
-            txdctl &= !(0x3F | (0x3F << 8) | (0x3F << 16));
+            txdctl &= !(0x3F | (0x3F << 8) | (0x0 << 16));
             txdctl |= 36 | (8 << 8) | (4 << 16);
 
             self.set_reg32(IXGBE_TXDCTL(u32::from(i)), txdctl);

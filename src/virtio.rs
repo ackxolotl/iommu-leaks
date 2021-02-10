@@ -249,6 +249,18 @@ impl IxyDevice for VirtioDevice {
     fn enable_loopback(&self) {
         unimplemented!();
     }
+
+    fn disable_rx_queue(&mut self, _queue_id: u32) {
+        unimplemented!()
+    }
+
+    fn prepare_tx_desc(&mut self, _queue_id: u32, _buffer_addr: &[usize], _packet_len: usize) {
+        unimplemented!()
+    }
+
+    fn tx_prepared_desc(&mut self, _queue_id: u32, _num_packets: usize) -> u64 {
+        unimplemented!()
+    }
 }
 
 impl VirtioDevice {

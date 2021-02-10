@@ -354,6 +354,18 @@ impl IxyDevice for IxgbeVFDevice {
         // section 14.1
         self.set_reg32(IXGBE_HLREG0, self.get_reg32(IXGBE_HLREG0) | (1 << 15));
     }
+
+    fn disable_rx_queue(&mut self, _queue_id: u32) {
+        unimplemented!()
+    }
+
+    fn prepare_tx_desc(&mut self, _queue_id: u32, _buffer_addr: &[usize], _packet_len: usize) {
+        unimplemented!()
+    }
+
+    fn tx_prepared_desc(&mut self, _queue_id: u32, _num_packets: usize) -> u64 {
+        unimplemented!()
+    }
 }
 
 impl IxgbeVFDevice {
