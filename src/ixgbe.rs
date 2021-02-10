@@ -378,16 +378,14 @@ impl IxyDevice for IxgbeDevice {
             .get_mut(queue_id as usize)
             .expect("invalid tx queue id");
 
-        let mut cur_index = queue.tx_index;
-
-        for addr in buffer_addr {
+        for (index, addr) in buffer_addr.iter().enumerate() {
             unsafe {
                 ptr::write_volatile(
-                    &mut (*queue.descriptors.add(cur_index)).read.buffer_addr as *mut u64,
+                    &mut (*queue.descriptors.add(index)).read.buffer_addr as *mut u64,
                     *addr as u64,
                 );
                 ptr::write_volatile(
-                    &mut (*queue.descriptors.add(cur_index)).read.cmd_type_len as *mut u32,
+                    &mut (*queue.descriptors.add(index)).read.cmd_type_len as *mut u32,
                     IXGBE_ADVTXD_DCMD_EOP
                         //| IXGBE_ADVTXD_DCMD_RS              /* do not write back descriptor */
                         | IXGBE_ADVTXD_DCMD_IFCS
@@ -396,38 +394,28 @@ impl IxyDevice for IxgbeDevice {
                         | packet_len as u32,
                 );
                 ptr::write_volatile(
-                    &mut (*queue.descriptors.add(cur_index)).read.olinfo_status as *mut u32,
+                    &mut (*queue.descriptors.add(index)).read.olinfo_status as *mut u32,
                     (packet_len as u32) << IXGBE_ADVTXD_PAYLEN_SHIFT,
                 );
             }
-
-            cur_index = wrap_ring(cur_index, queue.num_descriptors);
         }
     }
 
-    fn tx_prepared_desc(&mut self, queue_id: u32, num_packets: usize) -> u64 {
+    /// Queue TX descriptors in range [from, to) for transmit.
+    fn tx_prepared_desc(&mut self, queue_id: u32, from: usize, to: usize) -> u64 {
+        // assert that from and to are in queue range and to >= 1?
+
         let queue = self
             .tx_queues
             .get_mut(queue_id as usize)
             .expect("invalid tx queue id");
 
-        let mut cur_index = queue.tx_index + num_packets - 1;
+        queue.clean_index = to;
 
-        if cur_index >= queue.num_descriptors {
-            cur_index -= queue.num_descriptors;
-        }
-
-        let descriptor = unsafe { &mut (*queue.descriptors.add(cur_index)) };
-
-        let tx_index = wrap_ring(cur_index, queue.num_descriptors);
-
-        queue.tx_index = tx_index;
-        queue.clean_index = tx_index;
+        let descriptor = unsafe { &mut (*queue.descriptors.add(to - 1)) };
 
         let cmd_type_len =
             unsafe { ptr::read_volatile(&descriptor.read.cmd_type_len as *const u32) };
-
-        let before = rdtsc();
 
         unsafe {
             ptr::write_volatile(
@@ -436,7 +424,43 @@ impl IxyDevice for IxgbeDevice {
             )
         };
 
-        self.set_reg32(IXGBE_TDT(queue_id), tx_index as u32);
+        let before;
+
+        // We want the NIC to process TX descriptors from a certain range.
+        // We assume tx_index = TDT = TDH, i.e. there are no pending TX packets.
+        // Depending on our range and tx_index we have to consider 3 cases:
+        //  #1: tx_index equals end   of range -> set head (TDH)  pointer to start       of range
+        //  #2: tx_index equals start of range -> set tail (TDT)  pointer to end         of range
+        //  #3: neither #1 nor #2 apply        -> set head + tail pointer to start + end of range
+        // Since we cannot set head and tail pointer at the same time, we have
+        // to disable the TX queue in case #3 to prevent processing of wrong
+        // descriptors.
+        if queue.tx_index == to {
+            before = rdtsc();
+
+            self.set_reg32(IXGBE_TDH(queue_id), from as u32);
+        } else if queue.tx_index == from {
+            queue.tx_index = to;
+
+            before = rdtsc();
+
+            self.set_reg32(IXGBE_TDT(queue_id), to as u32);
+        } else {
+            queue.tx_index = to;
+
+            // disable TX queue
+            self.clear_flags32(IXGBE_TXDCTL(queue_id), IXGBE_TXDCTL_ENABLE);
+            self.wait_clear_reg32(IXGBE_TXDCTL(queue_id), IXGBE_TXDCTL_ENABLE);
+
+            // set head and tail
+            self.set_reg32(IXGBE_TDH(queue_id), from as u32);
+            self.set_reg32(IXGBE_TDT(queue_id), to as u32);
+
+            before = rdtsc();
+
+            // re-enable TX queue
+            self.set_flags32(IXGBE_TXDCTL(queue_id), IXGBE_TXDCTL_ENABLE);
+        }
 
         loop {
             let status = unsafe { ptr::read_volatile(&descriptor.wb.status as *const u32) };

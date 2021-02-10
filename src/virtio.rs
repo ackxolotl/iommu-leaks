@@ -258,7 +258,7 @@ impl IxyDevice for VirtioDevice {
         unimplemented!()
     }
 
-    fn tx_prepared_desc(&mut self, _queue_id: u32, _num_packets: usize) -> u64 {
+    fn tx_prepared_desc(&mut self, _queue_id: u32, _from: usize, _to: usize) -> u64 {
         unimplemented!()
     }
 }

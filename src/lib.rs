@@ -144,7 +144,7 @@ pub trait IxyDevice {
 
     fn prepare_tx_desc(&mut self, queue_id: u32, buffer_addr: &[usize], packet_len: usize);
 
-    fn tx_prepared_desc(&mut self, queue_id: u32, num_packets: usize) -> u64;
+    fn tx_prepared_desc(&mut self, queue_id: u32, from: usize, to: usize) -> u64;
 }
 
 /// Holds network card stats about sent and received packets.
@@ -311,7 +311,7 @@ impl IxyDevice for Box<dyn IxyDevice> {
         (**self).prepare_tx_desc(queue_id, buffer_addr, packet_len)
     }
 
-    fn tx_prepared_desc(&mut self, queue_id: u32, num_packets: usize) -> u64 {
-        (**self).tx_prepared_desc(queue_id, num_packets)
+    fn tx_prepared_desc(&mut self, queue_id: u32, from: usize, to: usize) -> u64 {
+        (**self).tx_prepared_desc(queue_id, from, to)
     }
 }

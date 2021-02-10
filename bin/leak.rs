@@ -6,12 +6,12 @@ use ixy::memory::{alloc_pkt_batch, Mempool, Packet};
 use ixy::*;
 use simple_logger::SimpleLogger;
 
-// number of packets sent simultaneously by our driver
+// number of packets sent by our driver
 const BATCH_SIZE: usize = 63;
 // size of our packets
 const PACKET_SIZE: usize = 60;
 // number of packets in our mempool
-const NUM_PACKETS: usize = 512;
+const NUM_PACKETS: usize = 256;
 // size of our packet buffers in the mempool
 const BUFFER_SIZE: usize = 4096;
 
@@ -86,12 +86,10 @@ pub fn main() {
 
     let mut buffer: VecDeque<Packet> = VecDeque::with_capacity(BATCH_SIZE);
 
-    // get a batch full of physical addresses to prepare tx descriptors
-    alloc_pkt_batch(&pool, &mut buffer, BATCH_SIZE, PACKET_SIZE);
+    // get a batch full of physical addresses to prepare TX descriptors
+    alloc_pkt_batch(&pool, &mut buffer, 64, PACKET_SIZE);
 
-    // prepare the whole queue with tx descriptors, i.e. 63 and a duplicate address
-    let mut buffer_addrs: Vec<usize> = buffer.iter().map(|p| p.get_phys_addr()).collect();
-    buffer_addrs.push(buffer.front().unwrap().get_phys_addr());
+    let buffer_addrs: Vec<usize> = buffer.iter().map(|p| p.get_phys_addr()).collect();
 
     dev.prepare_tx_desc(0, &buffer_addrs, PACKET_SIZE);
 
@@ -100,7 +98,7 @@ pub fn main() {
     let mut squared_distance = 0.0;
 
     for _ in 0..(1 << 22) {
-        let cpu_cycles = dev.tx_prepared_desc(0, BATCH_SIZE);
+        let cpu_cycles = dev.tx_prepared_desc(0, 0, BATCH_SIZE);
 
         // fix when https://github.com/rust-lang/rust/issues/71126 has been stabilized
         let (new_count, new_mean, new_squared_distance) =
