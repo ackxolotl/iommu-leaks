@@ -43,12 +43,6 @@ pub struct Dma<T> {
 impl<T> Dma<T> {
     /// Allocates dma memory on a huge page.
     pub fn allocate(size: usize, require_contigous: bool) -> Result<Dma<T>, Box<dyn Error>> {
-        let size = if size % HUGE_PAGE_SIZE != 0 {
-            ((size >> HUGE_PAGE_BITS) + 1) << HUGE_PAGE_BITS
-        } else {
-            size
-        };
-
         if get_vfio_container() != -1 {
             debug!("allocating dma memory via VFIO");
 
@@ -153,7 +147,7 @@ impl<T> Dma<T> {
             let mut first_page = 0;
 
             for i in 0..(num_pages - 1) {
-                if i - first_page >= size / page_size {
+                if i - first_page >= size / page_size - 1 {
                     let memory = Dma {
                         virt: pages[first_page].0 as *mut T,
                         phys: virt_to_phys(pages[first_page].0 as usize)?,

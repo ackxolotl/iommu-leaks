@@ -425,7 +425,7 @@ impl IxyDevice for IxgbeDevice {
         queue.clean_index = tx_index;
 
         let cmd_type_len =
-            unsafe { ptr::read_volatile(descriptor.read.cmd_type_len as *const u32) };
+            unsafe { ptr::read_volatile(&descriptor.read.cmd_type_len as *const u32) };
 
         let before = rdtsc();
 
@@ -443,6 +443,12 @@ impl IxyDevice for IxgbeDevice {
 
             if (status & IXGBE_ADVTXD_STAT_DD) != 0 {
                 let after = rdtsc();
+
+                // unset RS bit ... do we need this?
+                unsafe {
+                    ptr::write_volatile(&mut descriptor.read.cmd_type_len as *mut u32, cmd_type_len)
+                };
+
                 return after - before;
             }
         }
@@ -722,8 +728,8 @@ impl IxgbeDevice {
             let mut txdctl = self.get_reg32(IXGBE_TXDCTL(u32::from(i)));
             // there are no defines for this in constants.rs for some reason
             // pthresh: 6:0, hthresh: 14:8, wthresh: 22:16
-            txdctl &= !(0x3F | (0x3F << 8) | (0x0 << 16));
-            txdctl |= 36 | (8 << 8) | (4 << 16);
+            txdctl &= !(0x7F | (0x7F << 8) | (0x7F << 16));
+            txdctl |= 36 | (8 << 8) | (0 << 16);
 
             self.set_reg32(IXGBE_TXDCTL(u32::from(i)), txdctl);
 
