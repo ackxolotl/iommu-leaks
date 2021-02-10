@@ -153,7 +153,7 @@ impl<T> Dma<T> {
             let mut first_page = 0;
 
             for i in 0..(num_pages - 1) {
-                if i - first_page >= size / page_size - 1 {
+                if i - first_page >= size / page_size {
                     let memory = Dma {
                         virt: pages[first_page].0 as *mut T,
                         phys: virt_to_phys(pages[first_page].0 as usize)?,
