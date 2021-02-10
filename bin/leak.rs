@@ -113,8 +113,8 @@ pub fn main() {
     let (mean, variance, sample_variance) = wellford_finalize(count, mean, squared_distance);
 
     println!("Mean:            {:.5}", mean);
-    println!("Variance:        {:.5}", variance);
-    println!("Sample variance: {:.5}", sample_variance);
+    println!("Variance:        {:.5}", variance.sqrt());
+    println!("Sample variance: {:.5}", sample_variance.sqrt());
 }
 
 /// Compute variance and mean in a single pass - update accumulators
