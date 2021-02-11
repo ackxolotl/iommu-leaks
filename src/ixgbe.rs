@@ -414,8 +414,12 @@ impl IxyDevice for IxgbeDevice {
 
         let descriptor = unsafe { &mut (*queue.descriptors.add(to - 1)) };
 
-        let cmd_type_len =
-            unsafe { ptr::read_volatile(&descriptor.read.cmd_type_len as *const u32) };
+        let (cmd_type_len, olinfo_status) = unsafe {
+            (
+                ptr::read_volatile(&descriptor.read.cmd_type_len as *const u32),
+                ptr::read_volatile(&descriptor.read.olinfo_status as *const u32),
+            )
+        };
 
         unsafe {
             ptr::write_volatile(
@@ -465,10 +469,23 @@ impl IxyDevice for IxgbeDevice {
             if (status & IXGBE_ADVTXD_STAT_DD) != 0 {
                 let after = rdtsc();
 
-                // unset RS bit ... do we need this?
-                unsafe {
-                    ptr::write_volatile(&mut descriptor.read.cmd_type_len as *mut u32, cmd_type_len)
-                };
+                let queue = self
+                    .tx_queues
+                    .get_mut(queue_id as usize)
+                    .expect("invalid tx queue id");
+
+                for index in from..to {
+                    unsafe {
+                        ptr::write_volatile(
+                            &mut (*queue.descriptors.add(index)).read.cmd_type_len as *mut u32,
+                            cmd_type_len,
+                        );
+                        ptr::write_volatile(
+                            &mut (*queue.descriptors.add(index)).read.olinfo_status as *mut u32,
+                            olinfo_status,
+                        );
+                    }
+                }
 
                 // wait until device really has finished
                 while self.get_reg32(IXGBE_TDT(queue_id)) != self.get_reg32(IXGBE_TDH(queue_id)) {}
