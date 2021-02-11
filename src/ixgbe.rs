@@ -465,13 +465,13 @@ impl IxyDevice for IxgbeDevice {
             if (status & IXGBE_ADVTXD_STAT_DD) != 0 {
                 let after = rdtsc();
 
-                // wait until device really has finished
-                while self.get_reg32(IXGBE_TDT(queue_id)) != self.get_reg32(IXGBE_TDH(queue_id)) {}
-
                 // unset RS bit ... do we need this?
                 unsafe {
                     ptr::write_volatile(&mut descriptor.read.cmd_type_len as *mut u32, cmd_type_len)
                 };
+
+                // wait until device really has finished
+                while self.get_reg32(IXGBE_TDT(queue_id)) != self.get_reg32(IXGBE_TDH(queue_id)) {}
 
                 return after - before;
             }

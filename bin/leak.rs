@@ -113,11 +113,15 @@ pub fn main() {
 
     dev.read_stats(&mut dev_stats);
 
-    println!("Packets sent: {}", dev_stats.tx_pkts);
+    println!(
+        "Packets / Batches: {} / {}",
+        dev_stats.tx_pkts,
+        dev_stats.tx_pkts as usize / BATCH_SIZE
+    );
 
     println!("Mean:                      {:.5}", mean);
-    println!("Standard deviation:        {:.5}", variance.sqrt());
-    println!("Sample standard deviation: {:.5}", sample_variance.sqrt());
+    println!("Standard deviation:        {:.6}", variance.sqrt());
+    println!("Sample standard deviation: {:.6}", sample_variance.sqrt());
 }
 
 /// Compute variance and mean in a single pass - update accumulators
