@@ -435,31 +435,28 @@ impl IxyDevice for IxgbeDevice {
         // Since we cannot set head and tail pointer at the same time, we have
         // to disable the TX queue in case #3 to prevent processing of wrong
         // descriptors.
-        if queue.tx_index == to {
-            before = rdtsc();
-
-            self.set_reg32(IXGBE_TDH(queue_id), from as u32);
-        } else if queue.tx_index == from {
+        if queue.tx_index == from {
             queue.tx_index = to;
 
             before = rdtsc();
 
             self.set_reg32(IXGBE_TDT(queue_id), to as u32);
         } else {
-            queue.tx_index = to;
-
             // disable TX queue
             self.clear_flags32(IXGBE_TXDCTL(queue_id), IXGBE_TXDCTL_ENABLE);
             self.wait_clear_reg32(IXGBE_TXDCTL(queue_id), IXGBE_TXDCTL_ENABLE);
 
-            // set head and tail
-            self.set_reg32(IXGBE_TDH(queue_id), from as u32);
-            self.set_reg32(IXGBE_TDT(queue_id), to as u32);
-
-            before = rdtsc();
+            // set TDH
+            self.wait_set_reg32(IXGBE_TDH(queue_id), from as u32);
+            self.wait_set_reg32(IXGBE_TDT(queue_id), from as u32);
 
             // re-enable TX queue
             self.set_flags32(IXGBE_TXDCTL(queue_id), IXGBE_TXDCTL_ENABLE);
+            self.wait_set_reg32(IXGBE_TXDCTL(queue_id), IXGBE_TXDCTL_ENABLE);
+
+            before = rdtsc();
+
+            self.set_reg32(IXGBE_TDT(queue_id), to as u32);
         }
 
         loop {
@@ -467,6 +464,9 @@ impl IxyDevice for IxgbeDevice {
 
             if (status & IXGBE_ADVTXD_STAT_DD) != 0 {
                 let after = rdtsc();
+
+                // wait until device really has finished
+                while self.get_reg32(IXGBE_TDT(queue_id)) != self.get_reg32(IXGBE_TDH(queue_id)) {}
 
                 // unset RS bit ... do we need this?
                 unsafe {

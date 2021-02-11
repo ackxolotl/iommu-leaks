@@ -77,12 +77,8 @@ pub fn main() {
     }
 
     let mut dev_stats = Default::default();
-    let mut dev_stats_old = Default::default();
 
     dev.reset_stats();
-
-    dev.read_stats(&mut dev_stats);
-    dev.read_stats(&mut dev_stats_old);
 
     let mut buffer: VecDeque<Packet> = VecDeque::with_capacity(BATCH_SIZE);
 
@@ -97,7 +93,12 @@ pub fn main() {
     let mut mean = 0.0;
     let mut squared_distance = 0.0;
 
-    for _ in 0..(1 << 22) {
+    // warm up caches
+    for _ in 0..(1 << 7) {
+        dev.tx_prepared_desc(0, 0, BATCH_SIZE);
+    }
+
+    for _ in 0..(1 << 14) {
         let cpu_cycles = dev.tx_prepared_desc(0, 0, BATCH_SIZE);
 
         // fix when https://github.com/rust-lang/rust/issues/71126 has been stabilized
@@ -110,9 +111,13 @@ pub fn main() {
 
     let (mean, variance, sample_variance) = wellford_finalize(count, mean, squared_distance);
 
-    println!("Mean:            {:.5}", mean);
-    println!("Variance:        {:.5}", variance.sqrt());
-    println!("Sample variance: {:.5}", sample_variance.sqrt());
+    dev.read_stats(&mut dev_stats);
+
+    println!("Packets sent: {}", dev_stats.tx_pkts);
+
+    println!("Mean:                      {:.5}", mean);
+    println!("Standard deviation:        {:.5}", variance.sqrt());
+    println!("Sample standard deviation: {:.5}", sample_variance.sqrt());
 }
 
 /// Compute variance and mean in a single pass - update accumulators
