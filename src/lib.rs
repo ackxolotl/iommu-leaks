@@ -129,9 +129,6 @@ pub trait IxyDevice {
     /// ```
     fn get_link_speed(&self) -> u16;
 
-    /// Enables loopback mode for this device.
-    fn enable_loopback(&self);
-
     /// Takes `Packet`s out of `buffer` to send out. This will busy wait until all packets from
     /// `buffer` are queued.
     fn tx_batch_busy_wait(&mut self, queue_id: u32, buffer: &mut VecDeque<Packet>) {
@@ -139,12 +136,6 @@ pub trait IxyDevice {
             self.tx_batch(queue_id, buffer);
         }
     }
-
-    fn disable_rx_queue(&mut self, queue_id: u32);
-
-    fn prepare_tx_desc(&mut self, queue_id: u32, buffer_addr: &[usize], packet_len: usize);
-
-    fn tx_prepared_desc(&mut self, queue_id: u32, from: usize, to: usize) -> u64;
 }
 
 /// Holds network card stats about sent and received packets.
@@ -297,21 +288,5 @@ impl IxyDevice for Box<dyn IxyDevice> {
 
     fn get_link_speed(&self) -> u16 {
         (**self).get_link_speed()
-    }
-
-    fn enable_loopback(&self) {
-        (**self).enable_loopback()
-    }
-
-    fn disable_rx_queue(&mut self, queue_id: u32) {
-        (**self).disable_rx_queue(queue_id)
-    }
-
-    fn prepare_tx_desc(&mut self, queue_id: u32, buffer_addr: &[usize], packet_len: usize) {
-        (**self).prepare_tx_desc(queue_id, buffer_addr, packet_len)
-    }
-
-    fn tx_prepared_desc(&mut self, queue_id: u32, from: usize, to: usize) -> u64 {
-        (**self).tx_prepared_desc(queue_id, from, to)
     }
 }

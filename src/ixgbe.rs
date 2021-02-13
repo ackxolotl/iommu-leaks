@@ -361,139 +361,6 @@ impl IxyDevice for IxgbeDevice {
             _ => 0,
         }
     }
-
-    /// Enables loopback mode for this device.
-    fn enable_loopback(&self) {
-        // section 14.1
-        self.set_reg32(IXGBE_HLREG0, self.get_reg32(IXGBE_HLREG0) | (1 << 15));
-    }
-
-    fn disable_rx_queue(&mut self, queue_id: u32) {
-        self.clear_flags32(IXGBE_RXDCTL(queue_id), IXGBE_RXDCTL_ENABLE);
-    }
-
-    fn prepare_tx_desc(&mut self, queue_id: u32, buffer_addr: &[usize], packet_len: usize) {
-        let queue = self
-            .tx_queues
-            .get_mut(queue_id as usize)
-            .expect("invalid tx queue id");
-
-        for (index, addr) in buffer_addr.iter().enumerate() {
-            unsafe {
-                ptr::write_volatile(
-                    &mut (*queue.descriptors.add(index)).read.buffer_addr as *mut u64,
-                    *addr as u64,
-                );
-                ptr::write_volatile(
-                    &mut (*queue.descriptors.add(index)).read.cmd_type_len as *mut u32,
-                    IXGBE_ADVTXD_DCMD_EOP
-                        //| IXGBE_ADVTXD_DCMD_RS              /* do not write back descriptor */
-                        | IXGBE_ADVTXD_DCMD_IFCS
-                        | IXGBE_ADVTXD_DCMD_DEXT
-                        | IXGBE_ADVTXD_DTYP_DATA
-                        | packet_len as u32,
-                );
-                ptr::write_volatile(
-                    &mut (*queue.descriptors.add(index)).read.olinfo_status as *mut u32,
-                    (packet_len as u32) << IXGBE_ADVTXD_PAYLEN_SHIFT,
-                );
-            }
-        }
-    }
-
-    /// Queue TX descriptors in range [from, to) for transmit.
-    fn tx_prepared_desc(&mut self, queue_id: u32, from: usize, to: usize) -> u64 {
-        // assert that from and to are in queue range and to >= 1?
-
-        let queue = self
-            .tx_queues
-            .get_mut(queue_id as usize)
-            .expect("invalid tx queue id");
-
-        queue.clean_index = to;
-
-        let descriptor = unsafe { &mut (*queue.descriptors.add(to - 1)) };
-
-        let (cmd_type_len, olinfo_status) = unsafe {
-            (
-                ptr::read_volatile(&descriptor.read.cmd_type_len as *const u32),
-                ptr::read_volatile(&descriptor.read.olinfo_status as *const u32),
-            )
-        };
-
-        unsafe {
-            ptr::write_volatile(
-                &mut descriptor.read.cmd_type_len as *mut u32,
-                cmd_type_len | IXGBE_ADVTXD_DCMD_RS,
-            )
-        };
-
-        let before;
-
-        // We want the NIC to process TX descriptors from a certain range.
-        // We assume tx_index = TDT = TDH, i.e. there are no pending TX packets.
-        // Depending on our range and tx_index we have to consider 3 cases:
-        //  #1: tx_index equals end   of range -> set head (TDH)  pointer to start       of range
-        //  #2: tx_index equals start of range -> set tail (TDT)  pointer to end         of range
-        //  #3: neither #1 nor #2 apply        -> set head + tail pointer to start + end of range
-        // Since we cannot set head and tail pointer at the same time, we have
-        // to disable the TX queue in case #3 to prevent processing of wrong
-        // descriptors.
-        if queue.tx_index == from {
-            queue.tx_index = to;
-
-            before = rdtsc();
-
-            self.set_reg32(IXGBE_TDT(queue_id), to as u32);
-        } else {
-            // disable TX queue
-            self.clear_flags32(IXGBE_TXDCTL(queue_id), IXGBE_TXDCTL_ENABLE);
-            self.wait_clear_reg32(IXGBE_TXDCTL(queue_id), IXGBE_TXDCTL_ENABLE);
-
-            // set TDH
-            self.wait_set_reg32(IXGBE_TDH(queue_id), from as u32);
-            self.wait_set_reg32(IXGBE_TDT(queue_id), from as u32);
-
-            // re-enable TX queue
-            self.set_flags32(IXGBE_TXDCTL(queue_id), IXGBE_TXDCTL_ENABLE);
-            self.wait_set_reg32(IXGBE_TXDCTL(queue_id), IXGBE_TXDCTL_ENABLE);
-
-            before = rdtsc();
-
-            self.set_reg32(IXGBE_TDT(queue_id), to as u32);
-        }
-
-        loop {
-            let status = unsafe { ptr::read_volatile(&descriptor.wb.status as *const u32) };
-
-            if (status & IXGBE_ADVTXD_STAT_DD) != 0 {
-                let after = rdtsc();
-
-                let queue = self
-                    .tx_queues
-                    .get_mut(queue_id as usize)
-                    .expect("invalid tx queue id");
-
-                for index in from..to {
-                    unsafe {
-                        ptr::write_volatile(
-                            &mut (*queue.descriptors.add(index)).read.cmd_type_len as *mut u32,
-                            cmd_type_len,
-                        );
-                        ptr::write_volatile(
-                            &mut (*queue.descriptors.add(index)).read.olinfo_status as *mut u32,
-                            olinfo_status,
-                        );
-                    }
-                }
-
-                // wait until device really has finished
-                while self.get_reg32(IXGBE_TDT(queue_id)) != self.get_reg32(IXGBE_TDH(queue_id)) {}
-
-                return after - before;
-            }
-        }
-    }
 }
 
 impl IxgbeDevice {
@@ -1159,6 +1026,139 @@ impl IxgbeDevice {
             }
         }
         Ok(())
+    }
+
+    /// Enables loopback mode for this device.
+    pub fn enable_loopback(&self) {
+        // section 14.1
+        self.set_reg32(IXGBE_HLREG0, self.get_reg32(IXGBE_HLREG0) | (1 << 15));
+    }
+
+    pub fn disable_rx_queue(&mut self, queue_id: u32) {
+        self.clear_flags32(IXGBE_RXDCTL(queue_id), IXGBE_RXDCTL_ENABLE);
+    }
+
+    pub fn prepare_tx_desc(&mut self, queue_id: u32, buffer_addr: &[usize], packet_len: usize) {
+        let queue = self
+            .tx_queues
+            .get_mut(queue_id as usize)
+            .expect("invalid tx queue id");
+
+        for (index, addr) in buffer_addr.iter().enumerate() {
+            unsafe {
+                ptr::write_volatile(
+                    &mut (*queue.descriptors.add(index)).read.buffer_addr as *mut u64,
+                    *addr as u64,
+                );
+                ptr::write_volatile(
+                    &mut (*queue.descriptors.add(index)).read.cmd_type_len as *mut u32,
+                    IXGBE_ADVTXD_DCMD_EOP
+                        //| IXGBE_ADVTXD_DCMD_RS              /* do not write back descriptor */
+                        | IXGBE_ADVTXD_DCMD_IFCS
+                        | IXGBE_ADVTXD_DCMD_DEXT
+                        | IXGBE_ADVTXD_DTYP_DATA
+                        | packet_len as u32,
+                );
+                ptr::write_volatile(
+                    &mut (*queue.descriptors.add(index)).read.olinfo_status as *mut u32,
+                    (packet_len as u32) << IXGBE_ADVTXD_PAYLEN_SHIFT,
+                );
+            }
+        }
+    }
+
+    /// Queue TX descriptors in range [from, to) for transmit.
+    pub fn tx_prepared_desc(&mut self, queue_id: u32, from: usize, to: usize) -> u64 {
+        // assert that from and to are in queue range and to >= 1?
+
+        let queue = self
+            .tx_queues
+            .get_mut(queue_id as usize)
+            .expect("invalid tx queue id");
+
+        queue.clean_index = to;
+
+        let descriptor = unsafe { &mut (*queue.descriptors.add(to - 1)) };
+
+        let (cmd_type_len, olinfo_status) = unsafe {
+            (
+                ptr::read_volatile(&descriptor.read.cmd_type_len as *const u32),
+                ptr::read_volatile(&descriptor.read.olinfo_status as *const u32),
+            )
+        };
+
+        unsafe {
+            ptr::write_volatile(
+                &mut descriptor.read.cmd_type_len as *mut u32,
+                cmd_type_len | IXGBE_ADVTXD_DCMD_RS,
+            )
+        };
+
+        let before;
+
+        // We want the NIC to process TX descriptors from a certain range.
+        // We assume tx_index = TDT = TDH, i.e. there are no pending TX packets.
+        // Depending on our range and tx_index we have to consider 3 cases:
+        //  #1: tx_index equals end   of range -> set head (TDH)  pointer to start       of range
+        //  #2: tx_index equals start of range -> set tail (TDT)  pointer to end         of range
+        //  #3: neither #1 nor #2 apply        -> set head + tail pointer to start + end of range
+        // Since we cannot set head and tail pointer at the same time, we have
+        // to disable the TX queue in case #3 to prevent processing of wrong
+        // descriptors.
+        if queue.tx_index == from {
+            queue.tx_index = to;
+
+            before = rdtsc();
+
+            self.set_reg32(IXGBE_TDT(queue_id), to as u32);
+        } else {
+            // disable TX queue
+            self.clear_flags32(IXGBE_TXDCTL(queue_id), IXGBE_TXDCTL_ENABLE);
+            self.wait_clear_reg32(IXGBE_TXDCTL(queue_id), IXGBE_TXDCTL_ENABLE);
+
+            // set TDH
+            self.wait_set_reg32(IXGBE_TDH(queue_id), from as u32);
+            self.wait_set_reg32(IXGBE_TDT(queue_id), from as u32);
+
+            // re-enable TX queue
+            self.set_flags32(IXGBE_TXDCTL(queue_id), IXGBE_TXDCTL_ENABLE);
+            self.wait_set_reg32(IXGBE_TXDCTL(queue_id), IXGBE_TXDCTL_ENABLE);
+
+            before = rdtsc();
+
+            self.set_reg32(IXGBE_TDT(queue_id), to as u32);
+        }
+
+        loop {
+            let status = unsafe { ptr::read_volatile(&descriptor.wb.status as *const u32) };
+
+            if (status & IXGBE_ADVTXD_STAT_DD) != 0 {
+                let after = rdtsc();
+
+                let queue = self
+                    .tx_queues
+                    .get_mut(queue_id as usize)
+                    .expect("invalid tx queue id");
+
+                for index in from..to {
+                    unsafe {
+                        ptr::write_volatile(
+                            &mut (*queue.descriptors.add(index)).read.cmd_type_len as *mut u32,
+                            cmd_type_len,
+                        );
+                        ptr::write_volatile(
+                            &mut (*queue.descriptors.add(index)).read.olinfo_status as *mut u32,
+                            olinfo_status,
+                        );
+                    }
+                }
+
+                // wait until device really has finished
+                while self.get_reg32(IXGBE_TDT(queue_id)) != self.get_reg32(IXGBE_TDH(queue_id)) {}
+
+                return after - before;
+            }
+        }
     }
 }
 

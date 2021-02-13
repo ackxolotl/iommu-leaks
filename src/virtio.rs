@@ -244,23 +244,6 @@ impl IxyDevice for VirtioDevice {
         // Virtio doesn't have a "link speed" per se so we just return something reasonable
         1000
     }
-
-    /// Enables loopback mode for this device.
-    fn enable_loopback(&self) {
-        unimplemented!();
-    }
-
-    fn disable_rx_queue(&mut self, _queue_id: u32) {
-        unimplemented!()
-    }
-
-    fn prepare_tx_desc(&mut self, _queue_id: u32, _buffer_addr: &[usize], _packet_len: usize) {
-        unimplemented!()
-    }
-
-    fn tx_prepared_desc(&mut self, _queue_id: u32, _from: usize, _to: usize) -> u64 {
-        unimplemented!()
-    }
 }
 
 impl VirtioDevice {

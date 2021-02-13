@@ -5,6 +5,8 @@ use std::process;
 use ixy::memory::{alloc_pkt_batch, Mempool, Packet};
 use ixy::*;
 use simple_logger::SimpleLogger;
+use ixy::ixgbe::IxgbeDevice;
+use std::error::Error;
 
 // number of packets sent by our driver
 const BATCH_SIZE: usize = 63;
@@ -15,8 +17,8 @@ const NUM_PACKETS: usize = 256;
 // size of our packet buffers in the mempool
 const BUFFER_SIZE: usize = 4096;
 
-pub fn main() {
-    SimpleLogger::new().init().unwrap();
+pub fn main() -> Result<(), Box<dyn Error>> {
+    SimpleLogger::new().init()?;
 
     let mut args = env::args();
     args.next();
@@ -29,7 +31,7 @@ pub fn main() {
         }
     };
 
-    let mut dev = ixy_init(&pci_addr, 1, 1, 0).unwrap();
+    let mut dev = IxgbeDevice::init(&pci_addr, 1, 1, 0)?;
 
     dev.disable_rx_queue(0);
     dev.enable_loopback();
@@ -57,7 +59,7 @@ pub fn main() {
     // VFs: src MAC must be MAC of the device (spoof check of PF)
     pkt_data[6..12].clone_from_slice(&dev.get_mac_addr());
 
-    let pool = Mempool::allocate(NUM_PACKETS, BUFFER_SIZE).unwrap();
+    let pool = Mempool::allocate(NUM_PACKETS, BUFFER_SIZE)?;
 
     // pre-fill all packet buffer in the pool with data and return them to the packet pool
     {
@@ -122,6 +124,8 @@ pub fn main() {
     println!("Mean:                      {:.5}", mean);
     println!("Standard deviation:        {:.6}", variance.sqrt());
     println!("Sample standard deviation: {:.6}", sample_variance.sqrt());
+
+    Ok(())
 }
 
 /// Compute variance and mean in a single pass - update accumulators
