@@ -412,7 +412,7 @@ pub fn alloc_contiguous_memory(size: usize) -> Result<(*mut u8, usize), Box<dyn 
     };
 
     if target == libc::MAP_FAILED {
-        return Err("failed to memory map".into());
+        return Err("failed to memory map target pool".into());
     }
 
     let pool = unsafe {
@@ -427,7 +427,7 @@ pub fn alloc_contiguous_memory(size: usize) -> Result<(*mut u8, usize), Box<dyn 
     };
 
     if pool == libc::MAP_FAILED {
-        Err("failed to memory map".into())
+        Err("failed to memory map page source pool".into())
     } else if unsafe { libc::mlock(pool as *mut libc::c_void, pool_size) } == 0 {
         let mut pages: Vec<(usize, usize)> = Vec::new();
 
@@ -445,7 +445,7 @@ pub fn alloc_contiguous_memory(size: usize) -> Result<(*mut u8, usize), Box<dyn 
         pages.sort_by_key(|k| k.1);
 
         for (i, p) in pages.iter_mut().enumerate() {
-            p.0 = unsafe {
+            let remap = unsafe {
                 libc::mremap(
                     p.0 as *mut libc::c_void,
                     page_size,
@@ -453,7 +453,13 @@ pub fn alloc_contiguous_memory(size: usize) -> Result<(*mut u8, usize), Box<dyn 
                     libc::MREMAP_MAYMOVE | libc::MREMAP_FIXED,
                     target as usize + i * page_size,
                 )
-            } as usize;
+            };
+
+            if remap == libc::MAP_FAILED {
+                return Err("failed to re-map memory".into());
+            }
+
+            p.0 = remap as usize;
             p.1 = virt_to_phys(p.0)?;
         }
 
@@ -462,18 +468,25 @@ pub fn alloc_contiguous_memory(size: usize) -> Result<(*mut u8, usize), Box<dyn 
         for i in 0..(num_pages - 1) {
             if i - first_page >= size / page_size - 1 {
                 // remap to beginning of target
+                if first_page > 0 {
+                    for (j, p) in pages[first_page..].iter_mut().enumerate() {
+                        let remap = unsafe {
+                            libc::mremap(
+                                p.0 as *mut libc::c_void,
+                                page_size,
+                                page_size,
+                                libc::MREMAP_MAYMOVE | libc::MREMAP_FIXED,
+                                target as usize + j * page_size,
+                            )
+                        };
 
-                for (j, p) in pages[first_page..].iter_mut().enumerate() {
-                    p.0 = unsafe {
-                        libc::mremap(
-                            p.0 as *mut libc::c_void,
-                            page_size,
-                            page_size,
-                            libc::MREMAP_MAYMOVE | libc::MREMAP_FIXED,
-                            target as usize + j * page_size,
-                        )
-                    } as usize;
-                    p.1 = virt_to_phys(p.0)?;
+                        if remap == libc::MAP_FAILED {
+                            return Err("failed to re-map memory".into());
+                        }
+
+                        p.0 = remap as usize;
+                        p.1 = virt_to_phys(p.0)?;
+                    }
                 }
 
                 return Ok((pages[first_page].0 as *mut u8, pages[first_page].1));
