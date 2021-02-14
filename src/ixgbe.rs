@@ -26,8 +26,8 @@ const MAX_QUEUES: u16 = 64;
 const PKT_BUF_ENTRY_SIZE: usize = 1024;
 const MIN_MEMPOOL_SIZE: usize = 128;
 
-const NUM_RX_QUEUE_ENTRIES: usize = 64;
-const NUM_TX_QUEUE_ENTRIES: usize = 64;
+const NUM_RX_QUEUE_ENTRIES: usize = 256;
+const NUM_TX_QUEUE_ENTRIES: usize = 256;
 const TX_CLEAN_BATCH: usize = 16;
 
 fn wrap_ring(index: usize, ring_size: usize) -> usize {
