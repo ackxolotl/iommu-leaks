@@ -61,19 +61,17 @@ pub fn main() -> Result<(), Box<dyn Error>> {
     let memory = alloc_contiguous_memory(64 * 4096)?;
 
     // pre-fill all packet buffer in the pool with data and return them to the packet pool
-    {
-        for i in 1..64 {
-            let p = unsafe { std::slice::from_raw_parts_mut(memory.0.add(4096 * i), PACKET_SIZE) };
+    for i in 1..64 {
+        let p = unsafe { std::slice::from_raw_parts_mut(memory.0.add(4096 * i), PACKET_SIZE) };
 
-            for (i, data) in pkt_data.iter().enumerate() {
-                p[i] = *data;
-            }
-
-            let checksum = calc_ipv4_checksum(&p[14..14 + 20]);
-            // Calculated checksum is little-endian; checksum field is big-endian
-            p[24] = (checksum >> 8) as u8;
-            p[25] = (checksum & 0xff) as u8;
+        for (i, data) in pkt_data.iter().enumerate() {
+            p[i] = *data;
         }
+
+        let checksum = calc_ipv4_checksum(&p[14..14 + 20]);
+        // Calculated checksum is little-endian; checksum field is big-endian
+        p[24] = (checksum >> 8) as u8;
+        p[25] = (checksum & 0xff) as u8;
     }
 
     let mut dev_stats = Default::default();
