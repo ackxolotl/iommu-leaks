@@ -42,39 +42,7 @@ pub struct Dma<T> {
 
 impl<T> Dma<T> {
     /// Allocates dma memory on a huge page.
-    pub fn allocate(size: usize, require_contiguous: bool) -> Result<Dma<T>, Box<dyn Error>> {
-        if get_vfio_container() != -1 {
-            debug!("allocating dma memory via VFIO");
-
-            let page_size = unsafe { libc::sysconf(libc::_SC_PAGE_SIZE) } as usize;
-
-            // round up multiple of page size
-            let size = ((size + page_size - 1) as isize & -(page_size as isize)) as usize;
-
-            let dma = Dma::allocate_bruteforce(size)?;
-
-            // This is the main IOMMU work: IOMMU DMA MAP the memory...
-            let iova = vfio_map_dma(dma.virt as *mut u8 as usize, size)?;
-
-            let memory = Dma {
-                virt: dma.virt as *mut T,
-                phys: iova,
-            };
-
-            Ok(memory)
-        } else {
-            debug!("allocating dma memory via huge page");
-
-            if require_contiguous && size > HUGE_PAGE_SIZE {
-                return Err("failed to map physically contiguous memory".into());
-            }
-
-            Ok(Dma::allocate_bruteforce(size)?)
-        }
-    }
-
-    /// Allocates contiguous memory using ordinary pages.
-    pub fn allocate_bruteforce(size: usize) -> Result<Dma<T>, Box<dyn Error>> {
+    pub fn allocate(size: usize, _require_contiguous: bool) -> Result<Dma<T>, Box<dyn Error>> {
         let (virt, phys) = alloc_contiguous_memory(size)?;
 
         let memory = Dma {
@@ -489,7 +457,17 @@ pub fn alloc_contiguous_memory(size: usize) -> Result<(*mut u8, usize), Box<dyn 
                     }
                 }
 
-                return Ok((pages[first_page].0 as *mut u8, pages[first_page].1));
+                let virt = pages[first_page].0;
+                let phys = if get_vfio_container() != -1 {
+                    debug!("allocating dma memory via VFIO");
+
+                    // This is the main IOMMU work: IOMMU DMA MAP the memory...
+                    vfio_map_dma(virt, size)?
+                } else {
+                    pages[first_page].1
+                };
+
+                return Ok((virt as *mut u8, phys));
             }
 
             if pages[i + 1].1 - pages[i].1 != page_size {
