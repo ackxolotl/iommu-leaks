@@ -42,7 +42,7 @@ pub struct Dma<T> {
 
 impl<T> Dma<T> {
     /// Allocates dma memory on a huge page.
-    pub fn allocate(size: usize, require_contigous: bool) -> Result<Dma<T>, Box<dyn Error>> {
+    pub fn allocate(size: usize, require_contiguous: bool) -> Result<Dma<T>, Box<dyn Error>> {
         if get_vfio_container() != -1 {
             debug!("allocating dma memory via VFIO");
 
@@ -65,7 +65,7 @@ impl<T> Dma<T> {
         } else {
             debug!("allocating dma memory via huge page");
 
-            if require_contigous && size > HUGE_PAGE_SIZE {
+            if require_contiguous && size > HUGE_PAGE_SIZE {
                 return Err("failed to map physically contiguous memory".into());
             }
 
@@ -74,97 +74,15 @@ impl<T> Dma<T> {
     }
 
     /// Allocates contiguous memory using ordinary pages.
-    fn allocate_bruteforce(size: usize) -> Result<Dma<T>, Box<dyn Error>> {
-        let page_size = unsafe { libc::sysconf(libc::_SC_PAGE_SIZE) } as usize;
+    pub fn allocate_bruteforce(size: usize) -> Result<Dma<T>, Box<dyn Error>> {
+        let (virt, phys) = alloc_contiguous_memory(size)?;
 
-        let num_pages = 1024;
-        let pool_size = num_pages * page_size;
-
-        // round up multiple of page size
-        let size = ((size + page_size - 1) as isize & -(page_size as isize)) as usize;
-
-        debug!("Requested {} pages", size / page_size);
-
-        // Allocate target area to map our pages into. This is to prevent collisions in the virtual address space during remapping
-        // Use libc::MAP_32BIT for compatibility with IOMMUs suporting only short IOVAs (i.e. <47 bit)
-        let target = unsafe {
-            libc::mmap(
-                ptr::null_mut(),
-                pool_size,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_32BIT,
-                -1,
-                0,
-            )
+        let memory = Dma {
+            virt: virt as *mut T,
+            phys,
         };
 
-        if target == libc::MAP_FAILED {
-            return Err("failed to memory map".into());
-        }
-
-        let pool = unsafe {
-            libc::mmap(
-                ptr::null_mut(),
-                pool_size,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE,
-                -1,
-                0,
-            )
-        };
-
-        if pool == libc::MAP_FAILED {
-            Err("failed to memory map".into())
-        } else if unsafe { libc::mlock(pool as *mut libc::c_void, pool_size) } == 0 {
-            let mut pages: Vec<(usize, usize)> = Vec::new();
-
-            for i in 0..num_pages {
-                let virt_addr = pool as usize + i * page_size;
-
-                unsafe {
-                    let tmp = ptr::read_volatile(virt_addr as *mut u8);
-                    ptr::write_volatile(virt_addr as *mut u8, tmp);
-                }
-
-                pages.push((virt_addr, virt_to_phys(virt_addr)?));
-            }
-
-            pages.sort_by_key(|k| k.1);
-
-            for (i, p) in pages.iter_mut().enumerate() {
-                p.0 = unsafe {
-                    libc::mremap(
-                        p.0 as *mut libc::c_void,
-                        page_size,
-                        page_size,
-                        libc::MREMAP_MAYMOVE | libc::MREMAP_FIXED,
-                        target as usize + i * page_size,
-                    )
-                } as usize;
-                p.1 = virt_to_phys(p.0)?;
-            }
-
-            let mut first_page = 0;
-
-            for i in 0..(num_pages - 1) {
-                if i - first_page >= size / page_size - 1 {
-                    let memory = Dma {
-                        virt: pages[first_page].0 as *mut T,
-                        phys: virt_to_phys(pages[first_page].0 as usize)?,
-                    };
-
-                    return Ok(memory);
-                }
-
-                if pages[i + 1].1 - pages[i].1 != page_size {
-                    first_page = i + 1;
-                }
-            }
-
-            Err("could not find contiguous memory".into())
-        } else {
-            Err("failed to memory lock huge page".into())
-        }
+        Ok(memory)
     }
 }
 
@@ -467,4 +385,107 @@ pub(crate) fn get_vfio_container() -> RawFd {
 
 pub(crate) fn set_vfio_container(cfd: RawFd) {
     unsafe { VFIO_CONTAINER_FILE_DESCRIPTOR = cfd }
+}
+
+pub fn alloc_contiguous_memory(size: usize) -> Result<(*mut u8, usize), Box<dyn Error>> {
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGE_SIZE) } as usize;
+
+    let num_pages = 1024;
+    let pool_size = num_pages * page_size;
+
+    // round up multiple of page size
+    let size = ((size + page_size - 1) as isize & -(page_size as isize)) as usize;
+
+    debug!("Requested {} pages", size / page_size);
+
+    // Allocate target area to map our pages into. This is to prevent collisions in the virtual address space during remapping
+    // Use libc::MAP_32BIT for compatibility with IOMMUs suporting only short IOVAs (i.e. <47 bit)
+    let target = unsafe {
+        libc::mmap(
+            ptr::null_mut(),
+            pool_size,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_32BIT,
+            -1,
+            0,
+        )
+    };
+
+    if target == libc::MAP_FAILED {
+        return Err("failed to memory map".into());
+    }
+
+    let pool = unsafe {
+        libc::mmap(
+            ptr::null_mut(),
+            pool_size,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE,
+            -1,
+            0,
+        )
+    };
+
+    if pool == libc::MAP_FAILED {
+        Err("failed to memory map".into())
+    } else if unsafe { libc::mlock(pool as *mut libc::c_void, pool_size) } == 0 {
+        let mut pages: Vec<(usize, usize)> = Vec::new();
+
+        for i in 0..num_pages {
+            let virt_addr = pool as usize + i * page_size;
+
+            unsafe {
+                let tmp = ptr::read_volatile(virt_addr as *mut u8);
+                ptr::write_volatile(virt_addr as *mut u8, tmp);
+            }
+
+            pages.push((virt_addr, virt_to_phys(virt_addr)?));
+        }
+
+        pages.sort_by_key(|k| k.1);
+
+        for (i, p) in pages.iter_mut().enumerate() {
+            p.0 = unsafe {
+                libc::mremap(
+                    p.0 as *mut libc::c_void,
+                    page_size,
+                    page_size,
+                    libc::MREMAP_MAYMOVE | libc::MREMAP_FIXED,
+                    target as usize + i * page_size,
+                )
+            } as usize;
+            p.1 = virt_to_phys(p.0)?;
+        }
+
+        let mut first_page = 0;
+
+        for i in 0..(num_pages - 1) {
+            if i - first_page >= size / page_size - 1 {
+                // remap to beginning of target
+
+                for (j, p) in pages[first_page..].iter_mut().enumerate() {
+                    p.0 = unsafe {
+                        libc::mremap(
+                            p.0 as *mut libc::c_void,
+                            page_size,
+                            page_size,
+                            libc::MREMAP_MAYMOVE | libc::MREMAP_FIXED,
+                            target as usize + j * page_size,
+                        )
+                    } as usize;
+                    p.1 = virt_to_phys(p.0)?;
+                }
+
+                return Ok((pages[first_page].0 as *mut u8, pages[first_page].1));
+            }
+
+            if pages[i + 1].1 - pages[i].1 != page_size {
+                first_page = i + 1;
+            }
+        }
+
+        Err("could not find contiguous memory".into())
+    } else {
+        Err("failed to memory lock pool".into())
+    }
 }

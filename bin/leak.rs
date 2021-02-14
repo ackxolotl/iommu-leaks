@@ -2,10 +2,10 @@ use std::collections::VecDeque;
 use std::env;
 use std::process;
 
+use ixy::ixgbe::IxgbeDevice;
 use ixy::memory::{alloc_pkt_batch, Mempool, Packet};
 use ixy::*;
 use simple_logger::SimpleLogger;
-use ixy::ixgbe::IxgbeDevice;
 use std::error::Error;
 
 // number of packets sent by our driver
@@ -89,7 +89,9 @@ pub fn main() -> Result<(), Box<dyn Error>> {
 
     let buffer_addrs: Vec<usize> = buffer.iter().map(|p| p.get_phys_addr()).collect();
 
-    dev.prepare_tx_desc(0, &buffer_addrs, PACKET_SIZE);
+    unsafe {
+        dev.set_tx_descriptors(0, &buffer_addrs, PACKET_SIZE);
+    }
 
     let mut count = 0;
     let mut mean = 0.0;
@@ -97,11 +99,11 @@ pub fn main() -> Result<(), Box<dyn Error>> {
 
     // warm up caches
     for _ in 0..(1 << 7) {
-        dev.tx_prepared_desc(0, 0, BATCH_SIZE);
+        unsafe { dev.tx_descriptors(0, 0, BATCH_SIZE) };
     }
 
     for _ in 0..(1 << 14) {
-        let cpu_cycles = dev.tx_prepared_desc(0, 0, BATCH_SIZE);
+        let cpu_cycles = unsafe { dev.tx_descriptors(0, 0, BATCH_SIZE) };
 
         // fix when https://github.com/rust-lang/rust/issues/71126 has been stabilized
         let (new_count, new_mean, new_squared_distance) =

@@ -1031,44 +1031,136 @@ impl IxgbeDevice {
     /// Enables loopback mode for this device.
     pub fn enable_loopback(&self) {
         // section 14.1
-        self.set_reg32(IXGBE_HLREG0, self.get_reg32(IXGBE_HLREG0) | (1 << 15));
+        self.set_flags32(IXGBE_HLREG0, IXGBE_HLREG0_LPBK);
+        // force link up
+        self.set_flags32(IXGBE_AUTOC, IXGBE_AUTOC_FLU);
     }
 
+    /// Disable loopback mode for this device.
+    pub fn disable_loopback(&self) {
+        // clear force link up
+        self.clear_flags32(IXGBE_AUTOC, IXGBE_AUTOC_FLU);
+        // section 14.1
+        self.clear_flags32(IXGBE_HLREG0, IXGBE_HLREG0_LPBK);
+    }
+
+    /// Enable RX queue `queue_id`.
+    pub fn enable_rx_queue(&mut self, queue_id: u32) {
+        self.set_flags32(IXGBE_RXDCTL(queue_id), IXGBE_RXDCTL_ENABLE);
+    }
+
+    /// Disable RX queue `queue_id`.
     pub fn disable_rx_queue(&mut self, queue_id: u32) {
         self.clear_flags32(IXGBE_RXDCTL(queue_id), IXGBE_RXDCTL_ENABLE);
     }
 
-    pub fn prepare_tx_desc(&mut self, queue_id: u32, buffer_addr: &[usize], packet_len: usize) {
+    /// Enable TX queue `queue_id`.
+    pub fn enable_tx_queue(&mut self, queue_id: u32) {
+        self.set_flags32(IXGBE_TXDCTL(queue_id), IXGBE_TXDCTL_ENABLE);
+        self.wait_set_reg32(IXGBE_TXDCTL(queue_id), IXGBE_TXDCTL_ENABLE);
+    }
+
+    /// Disable TX queue `queue_id`.
+    pub fn disable_tx_queue(&mut self, queue_id: u32) {
+        self.clear_flags32(IXGBE_TXDCTL(queue_id), IXGBE_TXDCTL_ENABLE);
+        self.wait_clear_reg32(IXGBE_TXDCTL(queue_id), IXGBE_TXDCTL_ENABLE);
+    }
+
+    /// Reinit TX queue `queue_id` at `virt_addr` / `phys_addr`.
+    pub unsafe fn reinit_tx_queue(&mut self, queue_id: u32, virt_addr: *mut u8, phys_addr: usize) {
+        self.disable_tx_queue(queue_id);
+
+        // section 7.1.9 - setup descriptor ring
+        let ring_size_bytes = NUM_TX_QUEUE_ENTRIES as usize * mem::size_of::<ixgbe_adv_tx_desc>();
+
+        memset(virt_addr, ring_size_bytes, 0xff);
+
+        self.set_reg32(
+            IXGBE_TDBAL(queue_id),
+            (phys_addr as u64 & 0xffff_ffff) as u32,
+        );
+        self.set_reg32(IXGBE_TDBAH(queue_id), (phys_addr as u64 >> 32) as u32);
+        self.set_reg32(IXGBE_TDLEN(queue_id), ring_size_bytes as u32);
+
+        debug!("tx ring {} phys addr: {:#x}", queue_id, phys_addr);
+        debug!("tx ring {} virt addr: {:p}", queue_id, virt_addr);
+
+        // descriptor writeback magic values, important to get good performance and low PCIe overhead
+        // see 7.2.3.4.1 and 7.2.3.5 for an explanation of these values and how to find good ones
+        // we just use the defaults from DPDK here, but this is a potentially interesting point for optimizations
+        let mut txdctl = self.get_reg32(IXGBE_TXDCTL(queue_id));
+        // there are no defines for this in constants.rs for some reason
+        // pthresh: 6:0, hthresh: 14:8, wthresh: 22:16
+        txdctl &= !(0x7F | (0x7F << 8) | (0x7F << 16));
+        txdctl |= 36 | (8 << 8) | (0 << 16);
+
+        self.set_reg32(IXGBE_TXDCTL(queue_id), txdctl);
+
+        let tx_queue = IxgbeTxQueue {
+            descriptors: virt_addr as *mut ixgbe_adv_tx_desc,
+            bufs_in_use: VecDeque::with_capacity(NUM_TX_QUEUE_ENTRIES),
+            pool: None,
+            num_descriptors: NUM_TX_QUEUE_ENTRIES,
+            clean_index: 0,
+            tx_index: 0,
+        };
+
+        self.tx_queues[queue_id as usize] = tx_queue;
+
+        debug!("starting tx queue {}", queue_id);
+
+        // tx queue starts out empty
+        self.set_reg32(IXGBE_TDH(queue_id), 0);
+        self.set_reg32(IXGBE_TDT(queue_id), 0);
+
+        // enable queue and wait if necessary
+        self.enable_tx_queue(queue_id);
+    }
+
+    pub unsafe fn set_tx_descriptor(
+        &mut self,
+        queue_id: u32,
+        desc_id: usize,
+        buffer_addr: u64,
+        packet_len: usize,
+    ) {
         let queue = self
             .tx_queues
             .get_mut(queue_id as usize)
             .expect("invalid tx queue id");
 
+        ptr::write_volatile(
+            &mut (*queue.descriptors.add(desc_id)).read.buffer_addr as *mut u64,
+            buffer_addr,
+        );
+        ptr::write_volatile(
+            &mut (*queue.descriptors.add(desc_id)).read.cmd_type_len as *mut u32,
+            IXGBE_ADVTXD_DCMD_EOP
+                //| IXGBE_ADVTXD_DCMD_RS              /* do not write back descriptor */
+                | IXGBE_ADVTXD_DCMD_IFCS
+                | IXGBE_ADVTXD_DCMD_DEXT
+                | IXGBE_ADVTXD_DTYP_DATA
+                | packet_len as u32,
+        );
+        ptr::write_volatile(
+            &mut (*queue.descriptors.add(desc_id)).read.olinfo_status as *mut u32,
+            (packet_len as u32) << IXGBE_ADVTXD_PAYLEN_SHIFT,
+        );
+    }
+
+    pub unsafe fn set_tx_descriptors(
+        &mut self,
+        queue_id: u32,
+        buffer_addr: &[usize],
+        packet_len: usize,
+    ) {
         for (index, addr) in buffer_addr.iter().enumerate() {
-            unsafe {
-                ptr::write_volatile(
-                    &mut (*queue.descriptors.add(index)).read.buffer_addr as *mut u64,
-                    *addr as u64,
-                );
-                ptr::write_volatile(
-                    &mut (*queue.descriptors.add(index)).read.cmd_type_len as *mut u32,
-                    IXGBE_ADVTXD_DCMD_EOP
-                        //| IXGBE_ADVTXD_DCMD_RS              /* do not write back descriptor */
-                        | IXGBE_ADVTXD_DCMD_IFCS
-                        | IXGBE_ADVTXD_DCMD_DEXT
-                        | IXGBE_ADVTXD_DTYP_DATA
-                        | packet_len as u32,
-                );
-                ptr::write_volatile(
-                    &mut (*queue.descriptors.add(index)).read.olinfo_status as *mut u32,
-                    (packet_len as u32) << IXGBE_ADVTXD_PAYLEN_SHIFT,
-                );
-            }
+            self.set_tx_descriptor(queue_id, index, *addr as u64, packet_len);
         }
     }
 
     /// Queue TX descriptors in range [from, to) for transmit.
-    pub fn tx_prepared_desc(&mut self, queue_id: u32, from: usize, to: usize) -> u64 {
+    pub unsafe fn tx_descriptors(&mut self, queue_id: u32, from: usize, to: usize) -> u64 {
         // assert that from and to are in queue range and to >= 1?
 
         let queue = self
@@ -1078,21 +1170,17 @@ impl IxgbeDevice {
 
         queue.clean_index = to;
 
-        let descriptor = unsafe { &mut (*queue.descriptors.add(to - 1)) };
+        let descriptor = &mut (*queue.descriptors.add(to - 1));
 
-        let (cmd_type_len, olinfo_status) = unsafe {
-            (
-                ptr::read_volatile(&descriptor.read.cmd_type_len as *const u32),
-                ptr::read_volatile(&descriptor.read.olinfo_status as *const u32),
-            )
-        };
+        let (cmd_type_len, olinfo_status) = (
+            ptr::read_volatile(&descriptor.read.cmd_type_len as *const u32),
+            ptr::read_volatile(&descriptor.read.olinfo_status as *const u32),
+        );
 
-        unsafe {
-            ptr::write_volatile(
-                &mut descriptor.read.cmd_type_len as *mut u32,
-                cmd_type_len | IXGBE_ADVTXD_DCMD_RS,
-            )
-        };
+        ptr::write_volatile(
+            &mut descriptor.read.cmd_type_len as *mut u32,
+            cmd_type_len | IXGBE_ADVTXD_DCMD_RS,
+        );
 
         let before;
 
@@ -1112,17 +1200,13 @@ impl IxgbeDevice {
 
             self.set_reg32(IXGBE_TDT(queue_id), to as u32);
         } else {
-            // disable TX queue
-            self.clear_flags32(IXGBE_TXDCTL(queue_id), IXGBE_TXDCTL_ENABLE);
-            self.wait_clear_reg32(IXGBE_TXDCTL(queue_id), IXGBE_TXDCTL_ENABLE);
+            self.disable_tx_queue(queue_id);
 
-            // set TDH
+            // set TDH + TDT
             self.wait_set_reg32(IXGBE_TDH(queue_id), from as u32);
             self.wait_set_reg32(IXGBE_TDT(queue_id), from as u32);
 
-            // re-enable TX queue
-            self.set_flags32(IXGBE_TXDCTL(queue_id), IXGBE_TXDCTL_ENABLE);
-            self.wait_set_reg32(IXGBE_TXDCTL(queue_id), IXGBE_TXDCTL_ENABLE);
+            self.enable_tx_queue(queue_id);
 
             before = rdtsc();
 
@@ -1130,7 +1214,7 @@ impl IxgbeDevice {
         }
 
         loop {
-            let status = unsafe { ptr::read_volatile(&descriptor.wb.status as *const u32) };
+            let status = ptr::read_volatile(&descriptor.wb.status as *const u32);
 
             if (status & IXGBE_ADVTXD_STAT_DD) != 0 {
                 let after = rdtsc();
@@ -1141,16 +1225,14 @@ impl IxgbeDevice {
                     .expect("invalid tx queue id");
 
                 for index in from..to {
-                    unsafe {
-                        ptr::write_volatile(
-                            &mut (*queue.descriptors.add(index)).read.cmd_type_len as *mut u32,
-                            cmd_type_len,
-                        );
-                        ptr::write_volatile(
-                            &mut (*queue.descriptors.add(index)).read.olinfo_status as *mut u32,
-                            olinfo_status,
-                        );
-                    }
+                    ptr::write_volatile(
+                        &mut (*queue.descriptors.add(index)).read.cmd_type_len as *mut u32,
+                        cmd_type_len,
+                    );
+                    ptr::write_volatile(
+                        &mut (*queue.descriptors.add(index)).read.olinfo_status as *mut u32,
+                        olinfo_status,
+                    );
                 }
 
                 // wait until device really has finished
