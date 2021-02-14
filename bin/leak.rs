@@ -1,9 +1,8 @@
-use std::collections::VecDeque;
 use std::env;
 use std::process;
 
 use ixy::ixgbe::IxgbeDevice;
-use ixy::memory::{alloc_pkt_batch, Mempool, Packet};
+use ixy::memory::alloc_contiguous_memory;
 use ixy::*;
 use simple_logger::SimpleLogger;
 use std::error::Error;
@@ -59,18 +58,17 @@ pub fn main() -> Result<(), Box<dyn Error>> {
     // VFs: src MAC must be MAC of the device (spoof check of PF)
     pkt_data[6..12].clone_from_slice(&dev.get_mac_addr());
 
-    let pool = Mempool::allocate(NUM_PACKETS, BUFFER_SIZE)?;
+    let memory = alloc_contiguous_memory(64 * 4096)?;
 
     // pre-fill all packet buffer in the pool with data and return them to the packet pool
     {
-        let mut buffer: VecDeque<Packet> = VecDeque::with_capacity(NUM_PACKETS);
+        for i in 1..64 {
+            let p = unsafe { std::slice::from_raw_parts_mut(memory.0.add(4096 * i), PACKET_SIZE) };
 
-        alloc_pkt_batch(&pool, &mut buffer, NUM_PACKETS, PACKET_SIZE);
-
-        for p in buffer.iter_mut() {
             for (i, data) in pkt_data.iter().enumerate() {
                 p[i] = *data;
             }
+
             let checksum = calc_ipv4_checksum(&p[14..14 + 20]);
             // Calculated checksum is little-endian; checksum field is big-endian
             p[24] = (checksum >> 8) as u8;
@@ -82,14 +80,11 @@ pub fn main() -> Result<(), Box<dyn Error>> {
 
     dev.reset_stats();
 
-    let mut buffer: VecDeque<Packet> = VecDeque::with_capacity(BATCH_SIZE);
-
-    // get a batch full of physical addresses to prepare TX descriptors
-    alloc_pkt_batch(&pool, &mut buffer, 64, PACKET_SIZE);
-
-    let buffer_addrs: Vec<usize> = buffer.iter().map(|p| p.get_phys_addr()).collect();
-
     unsafe {
+        dev.reinit_tx_queue(0, memory.0, memory.1);
+
+        let buffer_addrs: Vec<usize> = (1..64).map(|i| memory.1 + 4096 * i).collect();
+
         dev.set_tx_descriptors(0, &buffer_addrs, PACKET_SIZE);
     }
 
