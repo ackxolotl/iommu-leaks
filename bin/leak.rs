@@ -1,11 +1,13 @@
-use std::env;
+use std::error::Error;
+use std::os::unix::io::AsRawFd;
 use std::process;
+use std::{env, fs, ptr};
 
 use ixy::ixgbe::IxgbeDevice;
 use ixy::memory::alloc_contiguous_memory;
 use ixy::*;
+
 use simple_logger::SimpleLogger;
-use std::error::Error;
 
 // number of packets sent by our driver
 const BATCH_SIZE: usize = 63;
@@ -86,9 +88,7 @@ pub fn main() -> Result<(), Box<dyn Error>> {
         dev.set_tx_descriptors(0, &buffer_addrs, PACKET_SIZE);
     }
 
-    let mut count = 0;
-    let mut mean = 0.0;
-    let mut squared_distance = 0.0;
+    let mut logger = CPUCycleLogger::new()?;
 
     // warm up caches
     for _ in 0..(1 << 7) {
@@ -98,15 +98,8 @@ pub fn main() -> Result<(), Box<dyn Error>> {
     for _ in 0..(1 << 14) {
         let cpu_cycles = unsafe { dev.tx_descriptors(0, 0, BATCH_SIZE) };
 
-        // fix when https://github.com/rust-lang/rust/issues/71126 has been stabilized
-        let (new_count, new_mean, new_squared_distance) =
-            wellford_update(count, mean, squared_distance, cpu_cycles);
-        count = new_count;
-        mean = new_mean;
-        squared_distance = new_squared_distance;
+        logger.log(cpu_cycles);
     }
-
-    let (mean, variance, sample_variance) = wellford_finalize(count, mean, squared_distance);
 
     dev.read_stats(&mut dev_stats);
 
@@ -116,14 +109,19 @@ pub fn main() -> Result<(), Box<dyn Error>> {
         dev_stats.tx_pkts as usize / BATCH_SIZE
     );
 
+    let (mean, variance, sample_variance) = logger.stats();
+
     println!("Mean:                      {:.5}", mean);
     println!("Standard deviation:        {:.6}", variance.sqrt());
     println!("Sample standard deviation: {:.6}", sample_variance.sqrt());
+
+    logger.save("log.txt")?;
 
     Ok(())
 }
 
 /// Compute variance and mean in a single pass - update accumulators
+#[allow(dead_code)]
 #[inline(always)]
 fn wellford_update(count: u64, mean: f64, squared_distance: f64, value: u64) -> (u64, f64, f64) {
     let count = count + 1;
@@ -135,6 +133,7 @@ fn wellford_update(count: u64, mean: f64, squared_distance: f64, value: u64) -> 
 }
 
 /// Compute variance and mean in a single pass - calculate result
+#[allow(dead_code)]
 fn wellford_finalize(count: u64, mean: f64, squared_distance: f64) -> (f64, f64, f64) {
     (
         mean,
@@ -158,6 +157,84 @@ fn calc_ipv4_checksum(ipv4_header: &[u8]) -> u16 {
         }
     }
     !(checksum as u16)
+}
+
+struct CPUCycleLogger {
+    path: String,
+    addr: *mut u64,
+    index: usize,
+}
+
+impl CPUCycleLogger {
+    fn new() -> Result<CPUCycleLogger, Box<dyn Error>> {
+        let path = "/mnt/huge/ixy-cpu-cycle-logger".to_string();
+
+        if let Ok(f) = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(&path)
+        {
+            let ptr = unsafe {
+                libc::mmap(
+                    ptr::null_mut(),
+                    1 << 21,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_SHARED | libc::MAP_HUGETLB,
+                    f.as_raw_fd(),
+                    0,
+                )
+            };
+
+            if ptr == libc::MAP_FAILED {
+                Err("failed to memory map huge page - huge pages enabled and free?".into())
+            } else {
+                Ok(CPUCycleLogger {
+                    path,
+                    addr: ptr as *mut u64,
+                    index: 0,
+                })
+            }
+        } else {
+            Err("failed to memory map huge page".into())
+        }
+    }
+
+    fn log(&mut self, value: u64) {
+        unsafe {
+            *self.addr.add(self.index) = value;
+        }
+        self.index += 1;
+    }
+
+    fn save(&mut self, file: &str) -> std::io::Result<()> {
+        fs::copy(&self.path, file)?;
+
+        Ok(fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(file)?
+            .set_len((self.index * 8) as u64)?)
+    }
+
+    fn stats(&self) -> (f64, f64, f64) {
+        assert!(self.index > 1, "not enough values");
+
+        let mean = unsafe {
+            (0..self.index).map(|x| *self.addr.add(x)).sum::<u64>() as f64 / self.index as f64
+        };
+
+        let numerator = unsafe {
+            (0..self.index)
+                .map(|x| (*self.addr.add(x) as f64 - mean).powi(2))
+                .sum::<f64>()
+        };
+
+        let variance = numerator / self.index as f64;
+        let sample_variance = numerator / (self.index - 1) as f64;
+
+        (mean, variance, sample_variance)
+    }
 }
 
 #[cfg(test)]
