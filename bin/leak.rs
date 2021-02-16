@@ -9,14 +9,12 @@ use ixy::*;
 
 use simple_logger::SimpleLogger;
 
-// number of packets sent by our driver
-const BATCH_SIZE: usize = 63;
+// 4 KiB pages (TX queue + packet buffer) used for one batch of packets
+const NUM_PAGES: usize = 64;
+// batch size
+const BATCH_SIZE: usize = NUM_PAGES - 1;
 // size of our packets
 const PACKET_SIZE: usize = 60;
-// number of packets in our mempool
-const NUM_PACKETS: usize = 256;
-// size of our packet buffers in the mempool
-const BUFFER_SIZE: usize = 4096;
 
 pub fn main() -> Result<(), Box<dyn Error>> {
     SimpleLogger::new().init()?;
@@ -60,10 +58,10 @@ pub fn main() -> Result<(), Box<dyn Error>> {
     // VFs: src MAC must be MAC of the device (spoof check of PF)
     pkt_data[6..12].clone_from_slice(&dev.get_mac_addr());
 
-    let memory = alloc_contiguous_memory(64 * 4096)?;
+    let memory = alloc_contiguous_memory(NUM_PAGES * 4096)?;
 
     // pre-fill all packet buffer in the pool with data and return them to the packet pool
-    for i in 1..64 {
+    for i in 1..NUM_PAGES {
         let p = unsafe { std::slice::from_raw_parts_mut(memory.0.add(4096 * i), PACKET_SIZE) };
 
         for (i, data) in pkt_data.iter().enumerate() {
@@ -83,7 +81,7 @@ pub fn main() -> Result<(), Box<dyn Error>> {
     unsafe {
         dev.reinit_tx_queue(0, memory.0, memory.1);
 
-        let buffer_addrs: Vec<usize> = (1..64).map(|i| memory.1 + 4096 * i).collect();
+        let buffer_addrs: Vec<usize> = (1..NUM_PAGES).map(|i| memory.1 + 4096 * i).collect();
 
         dev.set_tx_descriptors(0, &buffer_addrs, PACKET_SIZE);
     }
