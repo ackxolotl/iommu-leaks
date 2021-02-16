@@ -96,7 +96,7 @@ pub fn main() -> Result<(), Box<dyn Error>> {
     for _ in 0..(1 << 14) {
         let cpu_cycles = unsafe { dev.tx_descriptors(0, 0, BATCH_SIZE) };
 
-        logger.log(cpu_cycles);
+        logger.log(cpu_cycles as u32);
     }
 
     dev.read_stats(&mut dev_stats);
@@ -159,7 +159,7 @@ fn calc_ipv4_checksum(ipv4_header: &[u8]) -> u16 {
 
 struct CPUCycleLogger {
     path: String,
-    addr: *mut u64,
+    addr: *mut u32,
     index: usize,
 }
 
@@ -189,7 +189,7 @@ impl CPUCycleLogger {
             } else {
                 Ok(CPUCycleLogger {
                     path,
-                    addr: ptr as *mut u64,
+                    addr: ptr as *mut u32,
                     index: 0,
                 })
             }
@@ -198,7 +198,7 @@ impl CPUCycleLogger {
         }
     }
 
-    fn log(&mut self, value: u64) {
+    fn log(&mut self, value: u32) {
         unsafe {
             *self.addr.add(self.index) = value;
         }
@@ -212,14 +212,17 @@ impl CPUCycleLogger {
             .read(true)
             .write(true)
             .open(file)?
-            .set_len((self.index * 8) as u64)?)
+            .set_len((self.index * 4) as u64)?)
     }
 
     fn stats(&self) -> (f64, f64, f64) {
         assert!(self.index > 1, "not enough values");
 
         let mean = unsafe {
-            (0..self.index).map(|x| *self.addr.add(x)).sum::<u64>() as f64 / self.index as f64
+            (0..self.index)
+                .map(|x| *self.addr.add(x) as usize)
+                .sum::<usize>() as f64
+                / self.index as f64
         };
 
         let numerator = unsafe {
