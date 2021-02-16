@@ -8,6 +8,7 @@ use ixy::ixgbe::IxgbeDevice;
 use ixy::memory::alloc_contiguous_memory;
 use ixy::*;
 
+use chrono::prelude::*;
 use simple_logger::SimpleLogger;
 
 // 4 KiB pages (TX queue + packet buffer) used for one batch of packets
@@ -94,6 +95,8 @@ pub fn main() -> Result<(), Box<dyn Error>> {
         unsafe { dev.tx_descriptors(0, 0, BATCH_SIZE) };
     }
 
+    while Local::now().timestamp() < 1613489120 {}
+    println!("go @ {}", Local::now().timestamp().to_string());
     let time = Instant::now();
 
     // 1 << 19 = one 2 MiB huge page full of 32 bit values
