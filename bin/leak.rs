@@ -1,6 +1,7 @@
 use std::error::Error;
 use std::os::unix::io::AsRawFd;
 use std::process;
+use std::time::Instant;
 use std::{env, fs, ptr};
 
 use ixy::ixgbe::IxgbeDevice;
@@ -89,11 +90,14 @@ pub fn main() -> Result<(), Box<dyn Error>> {
     let mut logger = CPUCycleLogger::new()?;
 
     // warm up caches
-    for _ in 0..(1 << 7) {
+    for _ in 0..(1 << 18) {
         unsafe { dev.tx_descriptors(0, 0, BATCH_SIZE) };
     }
 
-    for _ in 0..(1 << 14) {
+    let time = Instant::now();
+
+    // 1 << 19 = one 2 MiB huge page full of 32 bit values
+    for _ in 0..(1 << 19) {
         let cpu_cycles = unsafe { dev.tx_descriptors(0, 0, BATCH_SIZE) };
 
         logger.log(cpu_cycles as u32);
@@ -105,6 +109,11 @@ pub fn main() -> Result<(), Box<dyn Error>> {
         "Packets / Batches: {} / {}",
         dev_stats.tx_pkts,
         dev_stats.tx_pkts as usize / BATCH_SIZE
+    );
+
+    println!(
+        "Time elapsed: {:.3}",
+        time.elapsed().as_millis() as f64 / 1000.0
     );
 
     let (mean, variance, sample_variance) = logger.stats();
