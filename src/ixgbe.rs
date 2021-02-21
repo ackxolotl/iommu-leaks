@@ -1219,6 +1219,9 @@ impl IxgbeDevice {
             if (status & IXGBE_ADVTXD_STAT_DD) != 0 {
                 let after = rdtsc();
 
+                // wait until device really has finished
+                while self.get_reg32(IXGBE_TDT(queue_id)) != self.get_reg32(IXGBE_TDH(queue_id)) {}
+
                 let queue = self
                     .tx_queues
                     .get_mut(queue_id as usize)
@@ -1234,9 +1237,6 @@ impl IxgbeDevice {
                         olinfo_status,
                     );
                 }
-
-                // wait until device really has finished
-                while self.get_reg32(IXGBE_TDT(queue_id)) != self.get_reg32(IXGBE_TDH(queue_id)) {}
 
                 return after - before;
             }
