@@ -1182,23 +1182,18 @@ impl IxgbeDevice {
             cmd_type_len | IXGBE_ADVTXD_DCMD_RS,
         );
 
-        let before;
-
-        // We want the NIC to process TX descriptors from a certain range.
-        // We assume tx_index = TDT = TDH, i.e. there are no pending TX packets.
-        // Depending on our range and tx_index we have to consider 3 cases:
-        //  #1: tx_index equals end   of range -> set head (TDH)  pointer to start       of range
-        //  #2: tx_index equals start of range -> set tail (TDT)  pointer to end         of range
-        //  #3: neither #1 nor #2 apply        -> set head + tail pointer to start + end of range
-        // Since we cannot set head and tail pointer at the same time, we have
-        // to disable the TX queue in case #3 to prevent processing of wrong
-        // descriptors.
+        // Main part of timing measurements:
+        // 1. Set queue head and tail pointer to first descriptor to be
+        //    transmitted
+        // 2. Take CPU cycles with rdtsc()
+        // 3. Transmit packets by setting tail pointer to last descriptor to be
+        //    transmitted
+        // 4. Once descriptors have been transmitted (DD bit set), take CPU
+        //    cycles another time
+        // 5. Wait until NIC is done, clean up descriptors
+        // 6. Return difference of previously measured CPU cycles
         if queue.tx_index == from {
             queue.tx_index = to;
-
-            before = rdtsc();
-
-            self.set_reg32(IXGBE_TDT(queue_id), to as u32);
         } else {
             self.disable_tx_queue(queue_id);
 
@@ -1207,11 +1202,11 @@ impl IxgbeDevice {
             self.wait_set_reg32(IXGBE_TDT(queue_id), from as u32);
 
             self.enable_tx_queue(queue_id);
-
-            before = rdtsc();
-
-            self.set_reg32(IXGBE_TDT(queue_id), to as u32);
         }
+
+        let before = rdtsc();
+
+        self.set_reg32(IXGBE_TDT(queue_id), to as u32);
 
         loop {
             let status = ptr::read_volatile(&descriptor.wb.status as *const u32);
